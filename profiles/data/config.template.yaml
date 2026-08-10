@@ -1,0 +1,21 @@
+version: 1
+profile: data
+source_dirs:
+  - src/
+generated_dirs:
+  - dist/
+commands:
+  build: <build-command>
+  lint: <lint-command>
+  test: <test-command>
+  check: <check-command>
+
+# ---- SDD 扩展字段（仅当任务命中 aios/execution/sdd-workflow.md 场景 A' 时需要，取消注释并按需修改）----
+# project:
+#   kind: tool-software
+# spec:
+#   type: docs
+# docs:
+#   domains: docs/domains/         # 功能规格（pipeline/表结构/口径定义）
+#   flows: docs/flows/             # 处理流程（调度、依赖顺序）
+#   design: docs/design/           # 设计文档（架构，如有）

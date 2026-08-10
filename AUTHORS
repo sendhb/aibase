@@ -1,0 +1,10 @@
+# AUTHORS — 本项目作者与贡献者
+#
+# 格式：姓名 <邮箱>（角色 / 贡献时间）
+# 按贡献时间排序，后续贡献者由维护者追加。
+
+sendhb <sendhb@21cn.com>
+  - 创建者（2026-07）
+  - AIOS 框架整体设计：AIOS 内核 / 角色式 Agent / 治理协议
+  - 可靠执行引擎：Plan → Impact → Execute → Reflect → Verify → Repair
+  - 评估体系与知识图谱

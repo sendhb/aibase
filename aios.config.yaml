@@ -1,0 +1,21 @@
+version: 1
+profile: framework-self
+# 这份 config.yaml 描述的是 aibase 这个仓库自己（框架的自举/dogfood 用例）——
+# 下游项目应该从 profiles/<type>/config.template.yaml 复制一份改成自己的。
+source_dirs:
+  - cli/
+  - aios/
+  - agents/
+  - profiles/
+  - knowledge/
+  - tools/
+  - docs/
+  - runtime/
+generated_dirs:
+  - cli/__pycache__/
+  - tests/__pycache__/
+commands:
+  build: "true"
+  lint: "true"
+  test: "python3 -m unittest discover -s tests"
+  check: "bash cli/check"
