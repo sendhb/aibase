@@ -34,16 +34,13 @@ runtime/tasks/TASK-*.md
 runtime/tasks/INDEX.md
 runtime/executions/*
 runtime/reviews/REVIEW-*.md
+runtime/states/CURRENT_FOCUS.md
+runtime/states/PROGRESS.md
+runtime/states/STATE-*.md
 runtime/verification/VERIFY-*.md
 runtime/logs/*
+runtime/locks/*
 runtime/memory/*
-
-# Python 编译缓存 (from aimonitor)
-__pycache__/
-*.pyc
-
-# AI agent 运行时状态 (from aimonitor)
-.codewhale/
 
 # Python 编译缓存
 __pycache__/

@@ -3,9 +3,9 @@
 mkdir -p ~/code/my-new-project && cd ~/code/my-new-project                                                                       
                                                                                                                                 
 ## 2. 安装框架（kit 路径按实际改）                                                                                                
-bash /home/user/code/aibase/cli/init .                                                                                             
+bash /home/hb/code/aibase/kit/cli/init .                                                                                             
 ###   交互式：选 profile + 填 build/lint/test/check 命令                                                                           
-###   非交互：bash cli/init . --profile backend --non-interactive                                                                  
+###   非交互：bash kit/cli/init . --profile backend --non-interactive                                                                  
                                                                                                                                 
 ## 3. git 初始化 + 挂钩子                                                                                                         
 git init                                                                                                                         
@@ -15,16 +15,16 @@ git config core.hooksPath .githooks
 ###    编辑 aios.config.yaml（命令占位符按项目实际填）                                                                             
                                                                                                                                 
 ## 5. 建第一个任务                                                                                                                
-cli/task new "搭建项目骨架并跑通 hello world" --priority P2 --risk P2                                                       
+kit/cli/task new "搭建项目骨架并跑通 hello world" --priority P2 --risk P2                                                       
                                                                                                                                 
 ## 6. 让 AI 进入工作流                                                                                                            
 ###    Claude Code:  cd 项目目录 && claude                                                                                         
 ###    其他工具:     直接读 AGENTS.md 进入                                                                                         
-###    开始任务:     bash cli/task start TASK-001                                                                                  
+###    开始任务:     bash kit/cli/task start TASK-001                                                                                  
                                                                                                                                 
 ### 常用确认命令                                                                                                                   
-bash cli/task list        # 看任务状态                                                                                           
-bash cli/check            # 框架健康检查                                                                                         
+bash kit/cli/task list        # 看任务状态                                                                                           
+bash kit/cli/check            # 框架健康检查                                                                                         
 
 、、、 ----------------------
 
@@ -34,8 +34,8 @@ bash cli/check            # 框架健康检查
                                                                                                                                     
 ## 方式 1：环境变量（推荐，可以给 coder/reviewer 配不同的模型）                                                                         
 ### 两个循环是独立进程，各自启动时设不同的模型                                                                                     
-   ANTHROPIC_MODEL=claude-opus-4-5    bash cli/autoloop-coder                                                                       
-   ANTHROPIC_MODEL=claude-sonnet-4-5  bash cli/autoloop-reviewer                                                                   
+   ANTHROPIC_MODEL=claude-opus-4-5    bash kit/cli/autoloop-coder                                                                       
+   ANTHROPIC_MODEL=claude-sonnet-4-5  bash kit/cli/autoloop-reviewer                                                                   
                                                                                                                                     
  ## 方式 2：Claude Code 设置文件                                                                                                       
                                                                                                                                     
@@ -50,15 +50,15 @@ bash cli/check            # 框架健康检查
 、、、 ----------------------
 
 # 箱内运行 review 循环的命令（带间隔参数）：                                        
-cli/sandbox-review -- bash cli/autoloop-reviewer --interval 300 --unattended
+kit/cli/sandbox-review -- bash kit/cli/autoloop-reviewer --interval 300 --unattended
 
-默认 300s（5 分钟）  │ cli/sandbox-review -- bash cli/autoloop-reviewer --interval 300 --unattended 
-10 分钟一轮          │ cli/sandbox-review -- bash cli/autoloop-reviewer --interval 600 --unattended
-1 分钟一轮（测试用） │ cli/sandbox-review -- bash cli/autoloop-reviewer --interval 60 --unattended 
-只跑一轮（非循环）   │ cli/sandbox-review -- bash cli/autoloop-reviewer --once --unattended  
+默认 300s（5 分钟）  │ kit/cli/sandbox-review -- bash kit/cli/autoloop-reviewer --interval 300 --unattended 
+10 分钟一轮          │ kit/cli/sandbox-review -- bash kit/cli/autoloop-reviewer --interval 600 --unattended
+1 分钟一轮（测试用） │ kit/cli/sandbox-review -- bash kit/cli/autoloop-reviewer --interval 60 --unattended 
+只跑一轮（非循环）   │ kit/cli/sandbox-review -- bash kit/cli/autoloop-reviewer --once --unattended  
 
 可选参数（按需追加）
-cli/sandbox-review -- bash cli/autoloop-reviewer --interval 300 --unattended --id reviewer-1 --timeout 1800
+kit/cli/sandbox-review -- bash kit/cli/autoloop-reviewer --interval 300 --unattended --id reviewer-1 --timeout 1800
 --interval SEC │ 轮询间隔（你问的这个）                      │ 300  
 --once         │ 只跑一轮就退出（不循环）                    │ 关  
 --unattended   │ 给 claude 传 --dangerously-skip-permissions │ 关    
@@ -124,41 +124,41 @@ cli/sandbox-review -- bash cli/autoloop-reviewer --interval 300 --unattended --i
 
 
 # cmd list all ============================================
-当前项目所有可用命令一览（基于 cli/ 及 git hooks 实测）：                                   
+当前项目所有可用命令一览（基于 kit/cli/ 及 git hooks 实测）：                                   
                                                                                              
  核心命令（8 个）                                                                            
                                                                                              
  ┌──────────────────────────────────────────────────┬──────────────────────────────────────┐ 
  │ 命令                                             │ 最短说明                             │ 
  ├──────────────────────────────────────────────────┼──────────────────────────────────────┤ 
- │ cli/init [目录] [--profile 类型]                 │ 把框架安装到目标工程（幂等，可反复执 │ 
+ │ kit/cli/init [目录] [--profile 类型]                 │ 把框架安装到目标工程（幂等，可反复执 │ 
  │ [--non-interactive]                              │ 行）                                 │ 
  ├──────────────────────────────────────────────────┼──────────────────────────────────────┤ 
- │ cli/task <子命令>                                │ 任务生命周期管理（见下表）           │ 
+ │ kit/cli/task <子命令>                                │ 任务生命周期管理（见下表）           │ 
  ├──────────────────────────────────────────────────┼──────────────────────────────────────┤ 
- │ cli/check                                        │ 框架健康检查（目录/角色/入口/任务格  │ 
+ │ kit/cli/check                                        │ 框架健康检查（目录/角色/入口/任务格  │ 
  │                                                  │ 式）                                 │ 
  ├──────────────────────────────────────────────────┼──────────────────────────────────────┤ 
- │ cli/protect [--unlock]                           │ 锁 generated_dirs 为只读（--unlock   │ 
+ │ kit/cli/protect [--unlock]                           │ 锁 generated_dirs 为只读（--unlock   │ 
  │                                                  │ 反向解锁）                           │ 
  ├──────────────────────────────────────────────────┼──────────────────────────────────────┤ 
- │ cli/sandbox-run [--network] -- <命令>            │ 无网络容器沙箱执行（Rule of Two      │ 
+ │ kit/cli/sandbox-run [--network] -- <命令>            │ 无网络容器沙箱执行（Rule of Two      │ 
  │                                                  │ 隔离）                               │ 
  ├──────────────────────────────────────────────────┼──────────────────────────────────────┤ 
- │ cli/sandbox-review -- <命令>                     │ 审查专用沙箱（有网+凭据，仅限可信代  │ 
+ │ kit/cli/sandbox-review -- <命令>                     │ 审查专用沙箱（有网+凭据，仅限可信代  │ 
  │                                                  │ 码）                                 │ 
  ├──────────────────────────────────────────────────┼──────────────────────────────────────┤ 
- │ cli/autoloop-coder [--interval] [--once]         │ 无人值守 Coder 循环（实验性）        │ 
+ │ kit/cli/autoloop-coder [--interval] [--once]         │ 无人值守 Coder 循环（实验性）        │ 
  │ [--unattended] [--id] [--timeout]                │                                      │ 
  ├──────────────────────────────────────────────────┼──────────────────────────────────────┤ 
- │ cli/autoloop-reviewer [--interval] [--once]      │ 无人值守 Reviewer 循环（实验性）     │ 
+ │ kit/cli/autoloop-reviewer [--interval] [--once]      │ 无人值守 Reviewer 循环（实验性）     │ 
  │ [--unattended] [--id] [--timeout] [--llm]        │                                      │ 
  └──────────────────────────────────────────────────┴──────────────────────────────────────┘ 
                                                                                              
- │ ⚠️ cli/task 是 python3 脚本（shebang #!/usr/bin/env python3），要直接 cli/task ... 或     
- │ python3 cli/task ... 执行——bash cli/task 会报错（import: command not found）。            
+ │ ⚠️ kit/cli/task 是 python3 脚本（shebang #!/usr/bin/env python3），要直接 kit/cli/task ... 或     
+ │ python3 kit/cli/task ... 执行——bash kit/cli/task 会报错（import: command not found）。            
                                                                                              
- cli/task 子命令（14 个）                                                                    
+ kit/cli/task 子命令（14 个）                                                                    
                                                                                              
  ┌────────────────────────┬────────────────────────────────────────────────────────────────┐ 
  │ 子命令                 │ 最短说明                                                       │ 
@@ -202,8 +202,8 @@ cli/sandbox-review -- bash cli/autoloop-reviewer --interval 300 --unattended --i
                                                                                              
  提醒                                                                                        
                                                                                              
- - cli/autoloop-* 的 --unattended 会给 claude 传                                             
+ - kit/cli/autoloop-* 的 --unattended 会给 claude 传                                             
    --dangerously-skip-permissions，只建议在隔离环境用（README 明确标注）。                   
- - tools/、aios/、agents/ 目录下是文档/能力说明，不是可执行命令。                            
+ - kit/tools/、kit/aios/、kit/agents/ 目录下是文档/能力说明，不是可执行命令。                            
  - 所有命令零网络依赖（autoloop-* 例外，内部调 claude -p）。   
  

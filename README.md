@@ -15,29 +15,35 @@
 | 🗺️ **知识图谱** | 模块关系 + 依赖图 + 架构决策记录 + 术语表 |
 | 📊 **评估体系** | 任务成功率 / 返工次数 / token 消耗 / 模型性能对比 |
 
-## 项目结构
+## 项目结构（kit 布局）
 
 ```
 aibase/
-├── AGENTS.md            ★ 所有 AI agent 的统一规则入口
-├── README.md            本文
-├── aios/                ★ AIOS 内核
-│   ├── governance/        治理协议（任务/修改/安全/风险）
-│   ├── cognition/         认知层（意图分析/歧义澄清）
-│   ├── execution/         可靠执行引擎（Plan→Impact→Execute→Reflect→Verify→Repair）
-│   ├── context/           上下文工程（选择/过滤/压缩/加载）
-│   ├── memory/            跨会话记忆系统
-│   ├── policy/            通用原则
-│   └── protocol/          协议规范
-├── agents/              ★ Agent 角色定义（7 个角色）
-├── profiles/            项目类型模板（backend/game-server/unity/unreal/frontend/data）
-├── knowledge/           ★ 知识图谱（模块/依赖/决策/历史/术语）
-├── tools/               工具能力层（git/filesystem/shell/docker/database/unity/unreal/browser）
-├── runtime/             运行时数据（tasks/states/reviews/verification/logs/memory）
-├── evaluation/          质量体系（metrics/benchmarks/failures/reports）
-├── cli/                 统一控制入口（init/task/check）
-└── docs/                架构文档
+├── AGENTS.md            ★ 项目入口（指向 kit/ 内规则）
+├── kit/                 ★ 框架（只读模板，与生成的项目结构一致）
+│   ├── aios/            AIOS 内核
+│   │   ├── governance/    治理协议（任务/修改/安全/风险）
+│   │   ├── cognition/     认知层（意图分析/歧义澄清）
+│   │   ├── execution/     可靠执行引擎（Plan→Impact→Execute→Reflect→Verify→Repair）
+│   │   ├── context/       上下文工程（选择/过滤/压缩/加载）
+│   │   ├── memory/        跨会话记忆系统
+│   │   ├── policy/        通用原则
+│   │   └── protocol/      协议规范
+│   ├── agents/          Agent 角色定义（7 个角色）
+│   ├── profiles/        项目类型模板（backend/game-server/unity/unreal/frontend/data/design）
+│   ├── knowledge/       框架知识库结构
+│   ├── tools/           工具能力层（git/filesystem/shell/docker/database/unity/unreal/browser）
+│   ├── cli/             统一控制入口（task/init/mkproject/publish/sync/check）
+│   ├── evaluation/      质量体系（metrics/benchmarks/failures/reports）
+│   └── runtime/         runtime 模板（TASK/VERIFY/REVIEW 模板）
+├── runtime/             本仓库运行数据（tasks/states/logs，本地）
+├── aios.config.yaml     项目配置
+├── install.sh/install.ps1  安装脚本（curl|bash / irm|iex）
+└── cmd-steps.md         kit 开发记录
 ```
+
+> **aibase 自身也是 kit 子目录布局**：`kit/` 结构与 `kit/cli/mkproject` 生成的项目一致，
+> 升级 = 整体替换 `kit/` 目录。
 
 ## 快速开始
 
@@ -45,20 +51,20 @@ aibase/
 # 1. 克隆本模板并安装到目标项目（交互式终端会问 profile 类型 + 真实命令，
 #    自动生成实例化好的 aios.config.yaml；非交互环境自动退化为纯拷贝模板）
 git clone https://github.com/your-org/aibase.git /tmp/framework
-bash /tmp/framework/cli/init /path/to/your-project
+bash /tmp/framework/kit/cli/mkproject /path/to/your-project --profile backend
 
-# 2. 锁生成代码目录只读（机械强制，跟具体 AI 工具无关；cli/init 已经跑过一次，
+# 2. 锁生成代码目录只读（机械强制，跟具体 AI 工具无关；kit/cli/init 已经跑过一次，
 #    generated_dirs 变化后重跑）
-bash cli/protect
+bash kit/cli/protect
 
 # 3. 创建第一个任务
-bash cli/task new "实现用户登录" --priority P1 --reviewer claude
+bash kit/cli/task new "实现用户登录" --priority P1 --reviewer claude
 
-# 4. 按闭环执行（AI agent 遵循 aios/execution/engine.md）
-bash cli/task start TASK-001
-bash cli/task verify TASK-001    # 真跑 build/lint/test/check，不是手写记录
-bash cli/task review TASK-001
-bash cli/task approve TASK-001
+# 4. 按闭环执行（AI agent 遵循 kit/aios/execution/engine.md）
+bash kit/cli/task start TASK-001
+bash kit/cli/task verify TASK-001    # 真跑 build/lint/test/check，不是手写记录
+bash kit/cli/task review TASK-001
+bash kit/cli/task approve TASK-001
 ```
 
 ## 设计理念
@@ -68,10 +74,12 @@ bash cli/task approve TASK-001
 - **文件即数据库**：所有协作状态存于文件系统，零依赖、可移植
 - **治理先于执行**：任何 AI 动作前先过 governance 协议检查权限/安全/风险
 
-## 作者
+## 署名
 
-- **sendhb** <sendhb@21cn.com> — 创建者（2026-07）
+- **作者 / Maintainer**：hb <sendhb@21cn.com>
 
-> 完整作者与贡献者清单见 [AUTHORS](AUTHORS)。
+## 许可证
 
+本项目采用 [MIT License](LICENSE) 发布。
 
+Copyright (c) 2026 hb <sendhb@21cn.com>
