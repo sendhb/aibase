@@ -67,6 +67,22 @@ bash kit/cli/task review TASK-001
 bash kit/cli/task approve TASK-001
 ```
 
+## Windows 平台使用说明
+
+框架跨平台（Python CLI 层零平台差异），但 bash 命令层需要 Git Bash 或 WSL。要点：
+
+| 场景 | 命令 | 说明 |
+|------|------|------|
+| 安装 | `irm https://<host>/install.ps1 \| iex` | PowerShell 安装（只检查依赖，不自动装） |
+| Python 命令 | `python kit\cli\task ...` | **Windows 用 `python`（不是 `python3`）**；安装 Python 后请确认 `python` 在 PATH |
+| bash 命令 | `bash kit/cli/check` 等 | 需 Git Bash 或 WSL（cmd/PowerShell 不能直接跑 bash 脚本） |
+| `task verify` | `python kit\cli\task verify TASK-001` | 真实执行 `aios.config.yaml` 的 build/lint/test/check |
+| 无人值守 autoloop-* | WSL 下运行 | 依赖 util-linux `flock`，Git Bash/MSYS 不带（会给出明确报错） |
+| 沙箱 sandbox-* | 仅 Linux/WSL | 依赖 Docker 容器，Windows 原生不支持 |
+
+其他：脚本/文档已通过 `.gitattributes` 固定行尾（`*.sh`/`*.py`/`*.md` 一律 LF，`*.ps1` 为 CRLF），
+Windows 与 Linux 检出确定一致；`install.ps1` 会同时识别 `python3` 与 `python`。
+
 ## 设计理念
 
 - **AI 不是"收到命令→执行"的助手**，而是"理解目标→建模→规划→执行→验证→学习"的执行者

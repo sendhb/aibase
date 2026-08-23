@@ -1,209 +1,90 @@
-# cmds
-## 1. 创建并进入项目目录                                                                                                          
-mkdir -p ~/code/my-new-project && cd ~/code/my-new-project                                                                       
-                                                                                                                                
-## 2. 安装框架（kit 路径按实际改）                                                                                                
-bash /home/hb/code/aibase/kit/cli/init .                                                                                             
-###   交互式：选 profile + 填 build/lint/test/check 命令                                                                           
-###   非交互：bash kit/cli/init . --profile backend --non-interactive                                                                  
-                                                                                                                                
-## 3. git 初始化 + 挂钩子                                                                                                         
-git init                                                                                                                         
-git config core.hooksPath .githooks                                                                                              
-                                                                                                                                
-## 4. 检查/补全配置                                                                                                               
-###    编辑 aios.config.yaml（命令占位符按项目实际填）                                                                             
-                                                                                                                                
-## 5. 建第一个任务                                                                                                                
-kit/cli/task new "搭建项目骨架并跑通 hello world" --priority P2 --risk P2                                                       
-                                                                                                                                
-## 6. 让 AI 进入工作流                                                                                                            
-###    Claude Code:  cd 项目目录 && claude                                                                                         
-###    其他工具:     直接读 AGENTS.md 进入                                                                                         
-###    开始任务:     bash kit/cli/task start TASK-001                                                                                  
-                                                                                                                                
-### 常用确认命令                                                                                                                   
-bash kit/cli/task list        # 看任务状态                                                                                           
-bash kit/cli/check            # 框架健康检查                                                                                         
+# cmd-steps — AIOS 框架命令行速查（Linux / Windows）
 
-、、、 ----------------------
+> 全部命令位于 `kit/cli/`。**Python3 命令**：Linux/Windows 原生可跑；**Bash 命令**：
+> Linux 原生，Windows 请在 Git Bash / MSYS / WSL 下执行。
+>
+> ⚠️ `task` 是 python3 脚本，必须 `kit/cli/task ...` 或 `python3 kit/cli/task ...`
+> （Windows 用 `python cli\task ...`）。**不要 `bash kit/cli/task`**——会把源码当 shell 解析。
 
+## 一、创建与安装
 
-# 修改llm和agent timer
-想指定具体模型：三种方式
-                                                                                                                                    
-## 方式 1：环境变量（推荐，可以给 coder/reviewer 配不同的模型）                                                                         
-### 两个循环是独立进程，各自启动时设不同的模型                                                                                     
-   ANTHROPIC_MODEL=claude-opus-4-5    bash kit/cli/autoloop-coder                                                                       
-   ANTHROPIC_MODEL=claude-sonnet-4-5  bash kit/cli/autoloop-reviewer                                                                   
-                                                                                                                                    
- ## 方式 2：Claude Code 设置文件                                                                                                       
-                                                                                                                                    
- ```bash                                                                                                                            
-   # 全局（~/.claude/settings.json）或项目级（.claude/settings.json）                                                               
-   # 加一行 "model": "claude-sonnet-4-5"                                                                                            
- ```                                                                                                                                
-                                                                                                                                    
- ## 方式 3：直接改脚本，把 claude -p "$prompt" 改成 claude -p "$prompt" --model <xxx>，或让 --model 成为可选参数。          
+| 命令 | 平台 | 简介 |
+|------|:----:|------|
+| `kit/cli/mkproject <目录> [--profile 类型] [--persona 名] [--no-persona] [--from <kit根>]` | Py3 | 用 kit/ 布局创建新项目（可选激活人格） |
+| `kit/cli/init [目录] [--profile 类型] [--non-interactive] [--install-deps] [--install-yes]` | Py3 | 把框架安装进已存在项目（幂等，可反复执行） |
 
+## 二、任务生命周期（`kit/cli/task`，Python3）
 
-、、、 ----------------------
+| 子命令 | 简介 |
+|--------|------|
+| `new "描述" [--priority] [--risk] [--assignee] [--reviewer] [--parent]` | 新建任务 |
+| `list [status]` | 列出任务，可按状态过滤 |
+| `show TASK-001` | 查看任务详情 |
+| `start TASK-001` | open → in-progress |
+| `verify TASK-001` | 真实跑 build/lint/test，通过才生成 VERIFY 记录 |
+| `review TASK-001` | in-progress → in-review（独立审查） |
+| `approve TASK-001` | 审查通过 |
+| `done TASK-001 [--force]` | 标记完成（--force 不得绕过前置条件） |
+| `block TASK-001 "原因"` / `unblock TASK-001` | 阻塞（如 P0 等人工批准）/ 解除阻塞 |
+| `cancel TASK-001` | 取消任务 |
+| `validate` | 校验全部任务文件格式 |
+| `index` | 重建任务索引 |
+| `stats` / `help` | 统计 / 帮助 |
 
-# 箱内运行 review 循环的命令（带间隔参数）：                                        
-kit/cli/sandbox-review -- bash kit/cli/autoloop-reviewer --interval 300 --unattended
+## 三、框架与沙箱
 
-默认 300s（5 分钟）  │ kit/cli/sandbox-review -- bash kit/cli/autoloop-reviewer --interval 300 --unattended 
-10 分钟一轮          │ kit/cli/sandbox-review -- bash kit/cli/autoloop-reviewer --interval 600 --unattended
-1 分钟一轮（测试用） │ kit/cli/sandbox-review -- bash kit/cli/autoloop-reviewer --interval 60 --unattended 
-只跑一轮（非循环）   │ kit/cli/sandbox-review -- bash kit/cli/autoloop-reviewer --once --unattended  
+| 命令 | 平台 | 简介 |
+|------|:----:|------|
+| `kit/cli/check` | Bash | 框架健康检查（目录/角色/入口/任务格式） |
+| `kit/cli/protect [--unlock]` | Bash | 锁 generated_dirs 只读（--unlock 反向解锁） |
+| `kit/cli/sandbox-run [--network] -- <命令>` | Bash+Docker | 无网络容器沙箱执行（Rule of Two 隔离） |
+| `kit/cli/sandbox-review -- <命令>` | Bash+Docker | 审查专用沙箱（有网+凭据，仅限可信代码） |
 
-可选参数（按需追加）
-kit/cli/sandbox-review -- bash kit/cli/autoloop-reviewer --interval 300 --unattended --id reviewer-1 --timeout 1800
---interval SEC │ 轮询间隔（你问的这个）                      │ 300  
---once         │ 只跑一轮就退出（不循环）                    │ 关  
---unattended   │ 给 claude 传 --dangerously-skip-permissions │ 关    
---id NAME      │ 区分多个循环实例                            │ autoloop-reviewer
---timeout SEC  │ 单次审查超时（超时杀掉卡死会话）            │ 1800   
+## 四、注册监控（agent，Python3）
 
+> 位置：`kit/tools/agent/agent.py`（监控平台 agent 注册链路，TASK-042~044）。
+> 配置：`agent.json`（默认读当前目录；示例 `kit/tools/agent/agent.json.example`）。
 
+| 命令 | 简介 |
+|------|------|
+| `python3 kit/tools/agent/agent.py --register [--config agent.json]` | 注册状态管理（构建申请 → 等待审批 → 已注册） |
+| `python3 kit/tools/agent/agent.py --register --status [--config agent.json]` | 查看当前注册状态 |
+| `python3 kit/tools/agent/agent.py --register --reset [--config agent.json]` | 重置注册状态（pending → unregistered） |
+| `python3 kit/tools/agent/agent.py [--config agent.json] [--once] [--interval N] [--quiet]` | 启动监控推送（默认常驻 30s 轮询；--once 单轮适合 cron/systemd） |
+| `python3 kit/tools/agent/agent.py --check-config [--config agent.json]` | 只校验配置（exit 0/1） |
 
-# 几个role 和 task 关系
- Q1：需求记录在哪里？还是直接用会话内容？                                                                                           
-                                                                                                                                    
- 不会只用会话内容。 按框架设计，会话是临时上下文，不是存储（AGENTS.md：上下文预算 ≤40%、按需加载、Clean                             
- Context——任务执行前要重新加载，不积压对话历史）。需求必须持久化到文件系统（框架"文件即数据库"原则）。                              
-                                                                                                                                    
- 需求落地的正确位置：                                                                                                               
-                                                                                                                                    
- ┌─────────────────────────────────────┬──────────────────────────────────────────────────────────────────────┬───────────────────┐ 
- │ 记录内容                            │ 落盘位置                                                             │ 由谁写            │ 
- ├─────────────────────────────────────┼──────────────────────────────────────────────────────────────────────┼───────────────────┤ 
- │ 需求描述 + 验收标准                 │ runtime/tasks/TASK-xxx.md（Manager 创建时写入 description /          │ Manager           │ 
- │                                     │ acceptance）                                                         │                   │ 
- ├─────────────────────────────────────┼──────────────────────────────────────────────────────────────────────┼───────────────────┤ 
- │ 需求分析 / 可验证技术要求 /         │ Analyst 报告——挂到 TASK 中或 docs/（sdd-workflow 场景                │ Analyst           │ 
- │ 歧义清单                            │ A：规格先于实现）                                                    │                   │ 
- ├─────────────────────────────────────┼──────────────────────────────────────────────────────────────────────┼───────────────────┤ 
- │ 架构方案 / 技术选型 / ADR           │ knowledge/decisions/ADR-xxx.md                                       │ Architect         │ 
- ├─────────────────────────────────────┼──────────────────────────────────────────────────────────────────────┼───────────────────┤ 
- │ 规格（监控协议/字段定义）           │ docs/ 对应域（本任务属于 docs 型规格，走 sdd-workflow 场景 A'）      │ Analyst →         │ 
- │                                     │                                                                      │ Architect         │ 
- └─────────────────────────────────────┴──────────────────────────────────────────────────────────────────────┴───────────────────┘ 
-                                                                                                                                    
- 流程本质：我在会话里听到你的需求 → 把需求转写为持久化的 TASK 文件（这一步本身就是 Manager 的工作）→ 之后的每一步（Analyst          
- 分析、Architect 设计）都以文件为载体重读，不依赖会话记忆。这样任何工具/会话都能接续，不会因会话丢失而丢需求。                      
-                                                                                                                                    
- ────────────────────────────────────────────────────────────────────────────────                                                   
-                                                                                                                                    
- Q2：每一步都建 TASK + 走 review 吗？还是直接做？                                                                                   
-                                                                                                                                    
- 不是每步都建 TASK，也不是都走 review——按风险分级（risk-policy.md），但所有"开发项"必须有 TASK。                                    
-                                                                                                                                    
- ┌──────────────────────────────────┬─────────────────────────────────┬──────────────────────────┬────────────────────────────────┐ 
- │ 活动类型                         │ 需要 TASK？                     │ 需要 review？            │ 依据                           │ 
- ├──────────────────────────────────┼─────────────────────────────────┼──────────────────────────┼────────────────────────────────┤ 
- │ 需求分析、架构设计、写规格文档   │ ❌ 不单独建，作为 TASK          │ ❌                       │ 属于 Manager/Analyst/Architect │ 
- │                                  │ 的内容/前置产出                 │                          │ 流程步骤，写入 TASK 文件即可   │ 
- ├──────────────────────────────────┼─────────────────────────────────┼──────────────────────────┼────────────────────────────────┤ 
- │ 改代码/改规格（开发项）          │ ✅                              │ 看级别 ↓                 │ task-policy                    │ 
- │                                  │ 必须（"所有开发项必须对应一个   │                          │                                │ 
- │                                  │ TASK"）                         │                          │                                │ 
- ├──────────────────────────────────┼─────────────────────────────────┼──────────────────────────┼────────────────────────────────┤ 
- │ P3（注释/README/格式）           │ TASK 或自由                     │ ❌                       │ risk-policy "自由执行"         │ 
- ├──────────────────────────────────┼─────────────────────────────────┼──────────────────────────┼────────────────────────────────┤ 
- │ P2（本监控功能大概率             │ ✅                              │ TASK 追踪即可，verify    │ risk-policy "P2 TASK 追踪即可" │ 
- │ P2：业务逻辑/UI）                │                                 │ 通过即可关闭，review     │                                │ 
- │                                  │                                 │ 非强制                   │                                │ 
- ├──────────────────────────────────┼─────────────────────────────────┼──────────────────────────┼────────────────────────────────┤ 
- │ P1（API 契约/CI/共享类型）       │ ✅                              │ ✅ 必须独立 reviewer     │ risk-policy "TASK 声明 +       │ 
- │                                  │                                 │                          │ reviewer 审查"                 │ 
- ├──────────────────────────────────┼─────────────────────────────────┼──────────────────────────┼────────────────────────────────┤ 
- │ P0（数据库/支付/auth/权限）      │ ✅                              │ ✅ + 人工批准            │ risk-policy "必须人工批准"     │ 
- └──────────────────────────────────┴─────────────────────────────────┴──────────────────────────┴────────────────────────────────┘           
-                                                                                            
+## 五、无人值守循环（autoloop，Bash）
 
+| 命令 | 简介 |
+|------|------|
+| `kit/cli/autoloop <coder\|reviewer\|both\|stop> [--interval] [--once] [--foreground] [--id] [--timeout]` | 循环启动器（常驻 both 默认后台；--foreground 前台配合 tmux） |
+| `kit/cli/autoloop-coder [--interval] [--once] [--unattended] [--id] [--timeout]` | 无人值守 Coder 循环（实验性） |
+| `kit/cli/autoloop-reviewer [--interval] [--once] [--unattended] [--id] [--timeout]` | 无人值守 Reviewer 循环（实验性） |
 
-# cmd list all ============================================
-当前项目所有可用命令一览（基于 kit/cli/ 及 git hooks 实测）：                                   
-                                                                                             
- 核心命令（8 个）                                                                            
-                                                                                             
- ┌──────────────────────────────────────────────────┬──────────────────────────────────────┐ 
- │ 命令                                             │ 最短说明                             │ 
- ├──────────────────────────────────────────────────┼──────────────────────────────────────┤ 
- │ kit/cli/init [目录] [--profile 类型]                 │ 把框架安装到目标工程（幂等，可反复执 │ 
- │ [--non-interactive]                              │ 行）                                 │ 
- ├──────────────────────────────────────────────────┼──────────────────────────────────────┤ 
- │ kit/cli/task <子命令>                                │ 任务生命周期管理（见下表）           │ 
- ├──────────────────────────────────────────────────┼──────────────────────────────────────┤ 
- │ kit/cli/check                                        │ 框架健康检查（目录/角色/入口/任务格  │ 
- │                                                  │ 式）                                 │ 
- ├──────────────────────────────────────────────────┼──────────────────────────────────────┤ 
- │ kit/cli/protect [--unlock]                           │ 锁 generated_dirs 为只读（--unlock   │ 
- │                                                  │ 反向解锁）                           │ 
- ├──────────────────────────────────────────────────┼──────────────────────────────────────┤ 
- │ kit/cli/sandbox-run [--network] -- <命令>            │ 无网络容器沙箱执行（Rule of Two      │ 
- │                                                  │ 隔离）                               │ 
- ├──────────────────────────────────────────────────┼──────────────────────────────────────┤ 
- │ kit/cli/sandbox-review -- <命令>                     │ 审查专用沙箱（有网+凭据，仅限可信代  │ 
- │                                                  │ 码）                                 │ 
- ├──────────────────────────────────────────────────┼──────────────────────────────────────┤ 
- │ kit/cli/autoloop-coder [--interval] [--once]         │ 无人值守 Coder 循环（实验性）        │ 
- │ [--unattended] [--id] [--timeout]                │                                      │ 
- ├──────────────────────────────────────────────────┼──────────────────────────────────────┤ 
- │ kit/cli/autoloop-reviewer [--interval] [--once]      │ 无人值守 Reviewer 循环（实验性）     │ 
- │ [--unattended] [--id] [--timeout] [--llm]        │                                      │ 
- └──────────────────────────────────────────────────┴──────────────────────────────────────┘ 
-                                                                                             
- │ ⚠️ kit/cli/task 是 python3 脚本（shebang #!/usr/bin/env python3），要直接 kit/cli/task ... 或     
- │ python3 kit/cli/task ... 执行——bash kit/cli/task 会报错（import: command not found）。            
-                                                                                             
- kit/cli/task 子命令（14 个）                                                                    
-                                                                                             
- ┌────────────────────────┬────────────────────────────────────────────────────────────────┐ 
- │ 子命令                 │ 最短说明                                                       │ 
- ├────────────────────────┼────────────────────────────────────────────────────────────────┤ 
- │ new "描述"             │ 新建任务（可带                                                 │ 
- │                        │ --priority/--risk/--assignee/--reviewer/--parent 等）          │ 
- ├────────────────────────┼────────────────────────────────────────────────────────────────┤ 
- │ list [status]          │ 列出任务，可按状态过滤                                         │ 
- ├────────────────────────┼────────────────────────────────────────────────────────────────┤ 
- │ show TASK-001          │ 查看单个任务详情                                               │ 
- ├────────────────────────┼────────────────────────────────────────────────────────────────┤ 
- │ start TASK-001         │ open → in-progress                                             │ 
- ├────────────────────────┼────────────────────────────────────────────────────────────────┤ 
- │ verify TASK-001        │ 真实跑 build/lint/test，通过才生成 VERIFY 记录                 │ 
- ├────────────────────────┼────────────────────────────────────────────────────────────────┤ 
- │ review TASK-001        │ 进入审查状态（in-progress → in-review）                        │ 
- ├────────────────────────┼────────────────────────────────────────────────────────────────┤ 
- │ approve TASK-001       │ 审查通过（in-review → done 前一步）                            │ 
- ├────────────────────────┼────────────────────────────────────────────────────────────────┤ 
- │ done TASK-001          │ 标记完成                                                       │ 
- │ [--force]              │                                                                │ 
- ├────────────────────────┼────────────────────────────────────────────────────────────────┤ 
- │ block TASK-001 "原因"  │ 阻塞任务（如 P0 等人工批准）                                   │ 
- ├────────────────────────┼────────────────────────────────────────────────────────────────┤ 
- │ unblock TASK-001       │ 解除阻塞                                                       │ 
- ├────────────────────────┼────────────────────────────────────────────────────────────────┤ 
- │ cancel TASK-001        │ 取消任务                                                       │ 
- ├────────────────────────┼────────────────────────────────────────────────────────────────┤ 
- │ validate               │ 校验全部任务文件格式                                           │ 
- ├────────────────────────┼────────────────────────────────────────────────────────────────┤ 
- │ index                  │ 重建任务索引                                                   │ 
- ├────────────────────────┼────────────────────────────────────────────────────────────────┤ 
- │ stats / help           │ 统计 / 帮助                                                    │ 
- └────────────────────────┴────────────────────────────────────────────────────────────────┘ 
-                                                                                             
- 自动触发（非手动命令）                                                                      
-                                                                                             
- - .githooks/pre-commit — 提交时检查：必须有 TASK 引用、不得碰 generated_dirs、check 通过    
- - .githooks/commit-msg — 提交信息格式校验                                                   
- - 安装时设置：git config core.hooksPath .githooks（让 hook 生效）                           
-                                                                                             
- 提醒                                                                                        
-                                                                                             
- - kit/cli/autoloop-* 的 --unattended 会给 claude 传                                             
-   --dangerously-skip-permissions，只建议在隔离环境用（README 明确标注）。                   
- - kit/tools/、kit/aios/、kit/agents/ 目录下是文档/能力说明，不是可执行命令。                            
- - 所有命令零网络依赖（autoloop-* 例外，内部调 claude -p）。   
- 
+- 两循环独立进程，只通过 `runtime/tasks/` 文件耦合（生成者 ≠ 审查者）
+- 模型配置：各自启动时设 `ANTHROPIC_MODEL` 环境变量（如 `ANTHROPIC_MODEL=claude-sonnet-4-5`）
+
+## 六、人格与版本发布（Python3）
+
+| 命令 | 简介 |
+|------|------|
+| `kit/cli/persona list \| use <名> \| off \| show` | 人格按需加载/切换（激活写 `personas/active.md`，未激活=零加载） |
+| `kit/cli/persona ensure` | 确保人格已激活：active.md 缺失时从人格库随机激活一个（AI CLI 进入时调用） |
+| `kit/cli/publish <共享目录> [--version] [--include <目录>...]` | 冻结当前项目内容打包 + manifest，发布到共享位置 |
+| `kit/cli/sync <共享目录> [--package-name] [--version] [--dest]` | 按 manifest 从共享位置拉取指定版本到本地（单向显式同步） |
+
+## 七、自动触发（非手动命令）
+
+| Hook | 作用 |
+|------|------|
+| `.githooks/pre-commit` | 提交检查：必须有 TASK 引用、不得碰 generated_dirs、check 通过 |
+| `.githooks/commit-msg` | 提交信息格式校验 |
+
+生效：`git config core.hooksPath .githooks`（init 安装时自动设置）。
+
+## 提醒
+
+- `--unattended` 会给 claude 传 `--dangerously-skip-permissions`，**仅隔离环境使用**
+- `autoloop-*` 依赖 Claude Code CLI；`sandbox-*` 依赖 Docker
+- 除 `autoloop-*`（内部调 claude -p）外，其余命令零网络依赖
+- `kit/tools/` 仅 `agent/` 含可执行 CLI（注册监控）；`browser/filesystem/shell/database/sandbox/git/unity/unreal/docker` 为能力文档；`kit/aios/`、`kit/agents/` 为治理/角色说明，非可执行命令

@@ -8,9 +8,12 @@ agent.json 形状：
 
     {
       "server_url": "https://aimonitor.example.com/api/ingest",  # 必填
-      "token": "secret",                                          # 必填
+      "token": "secret",                                          # state=active 时必填
       "projects": [{"id": "proj-1", "path": "/srv/proj-1"}],      # 必填，至少 1 个
-      "poll_interval_seconds": 30                                 # 可选，默认 30
+      "poll_interval_seconds": 30,                                # 可选，默认 30
+      "state": "active",                                          # 可选，默认 active
+      "req_id": null,                                             # 可选，state=pending 时使用
+      "request_key": null                                         # 可选，state=pending 时使用
     }
 
 约定：
@@ -21,6 +24,7 @@ import json
 import os
 
 DEFAULT_POLL_INTERVAL_SECONDS = 30
+VALID_STATES = frozenset({"unregistered", "pending", "active"})
 
 
 class AgentConfigError(Exception):
@@ -58,13 +62,56 @@ def validate(cfg):
     else:
         server_url = server_url.strip()
 
-    token = cfg.get("token")
-    if _is_unset(token):
-        problems.append("缺少必填字段 token（推送到监控端的 Bearer token）")
-    elif not isinstance(token, str):
-        problems.append("token 必须是字符串")
+    # --- state 字段校验 ---
+    state = cfg.get("state", "active")
+    if state is None:
+        state = "active"
+    if not isinstance(state, str):
+        problems.append("state 必须是字符串（unregistered/pending/active）")
+        state = "active"
     else:
-        token = token.strip()
+        state = state.strip()
+        if state not in VALID_STATES:
+            problems.append(
+                f"state 必须为 unregistered/pending/active 之一（当前值: {state!r}）"
+            )
+            state = "active"
+
+    # --- token 校验（依赖 state） ---
+    token = cfg.get("token")
+    token_out = None
+    if state == "active":
+        if _is_unset(token):
+            problems.append("state=active 时 token 为必填（推送到监控端的 Bearer token）")
+        elif not isinstance(token, str):
+            problems.append("token 必须是字符串")
+        else:
+            token_out = token.strip()
+    else:
+        # state=unregistered 或 pending 时 token 可为空
+        if not _is_unset(token):
+            if isinstance(token, str):
+                token_out = token.strip()
+            else:
+                problems.append("token 必须是字符串")
+
+    # --- req_id / request_key 校验（仅在 state=pending 时关注） ---
+    req_id = cfg.get("req_id")
+    request_key = cfg.get("request_key")
+    req_id_out = None
+    request_key_out = None
+
+    if state == "pending":
+        if not _is_unset(req_id):
+            if isinstance(req_id, str):
+                req_id_out = req_id.strip()
+            else:
+                problems.append("req_id 必须是字符串")
+        if not _is_unset(request_key):
+            if isinstance(request_key, str):
+                request_key_out = request_key.strip()
+            else:
+                problems.append("request_key 必须是字符串")
 
     projects = cfg.get("projects")
     projects_out = []
@@ -109,9 +156,12 @@ def validate(cfg):
 
     return {
         "server_url": server_url,
-        "token": token,
+        "token": token_out,
         "projects": projects_out,
         "poll_interval_seconds": poll,
+        "state": state,
+        "req_id": req_id_out,
+        "request_key": request_key_out,
     }
 
 

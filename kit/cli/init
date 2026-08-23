@@ -38,6 +38,15 @@ import sys
 import platform
 from pathlib import Path
 
+# Windows GBK 控制台下，✓/⚠ 等 Unicode 字符无法编码会直接抛 UnicodeEncodeError
+# 导致 init 在复制完成后才崩溃（TASK-011 同类）。统一重配为 UTF-8 + replace
+# （Linux UTF-8 locale 下 reconfigure 无副作用）。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 # ---------- 路径定位 ----------
 # resolve() 解析符号链接：与 main() 中 target 的 .resolve() 口径一致，
 # 避免 src_root（逻辑路径）与 target（物理路径）不一致导致 guard 被绕过（FIND-002）。
@@ -384,9 +393,10 @@ def main():
     for d in (".cursor", ".claude", ".pi", ".github", ".githooks"):
         copy_dir(SRC_ROOT / d, target / d)
 
-    # ---------- 1d. 项目入口文件（AGENTS.md + opencode.md；CLAUDE.md symlink） ----------
+    # ---------- 1d. 项目入口文件（AGENTS.md + opencode.md + .gitattributes；CLAUDE.md symlink） ----------
     inst_file(SRC_ROOT / "AGENTS.md", target / "AGENTS.md")
     inst_file(SRC_ROOT / "opencode.md", target / "opencode.md")
+    inst_file(SRC_ROOT / ".gitattributes", target / ".gitattributes")  # TASK-009：新项目继承行尾规则
     make_symlink(target)
 
     # ---------- 2. runtime 模板 + 项目可写区 ----------

@@ -110,6 +110,7 @@ class AgentOnceSmokeTest(unittest.TestCase):
                 proc = subprocess.run(
                     [sys.executable, AGENT_SCRIPT, "--once", "--config", cfg_path],
                     cwd=REPO_ROOT, capture_output=True, text=True, timeout=60,
+                    encoding="utf-8", errors="replace",
                 )
 
                 self.assertEqual(

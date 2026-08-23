@@ -6,8 +6,8 @@
 
 | 阶段 | 状态 | 目标 | owner | 对应 TASK | 完成标志 |
 |------|------|------|-------|-----------|----------|
-| Phase 1: 框架自举 | done | 框架模板/CLI/autoloop/多机同步/Windows 安装/kit 布局 | hb-session | TASK-001..021 | 21/21 done |
-| Phase 2: 遥测 agent 组件 | done | `kit/tools/agent/`：AIOS 通用遥测推送组件（读取 runtime → 推送到监控端），随 mkproject 自动分发，消除被监控端安装动作 | hb-session | TASK-022..029, 035 | 组件文档 + 集成验证通过 |
+| Phase 1: 框架自举 | done | 框架模板/CLI/autoloop/多机同步/Windows 安装/kit 布局 | hb | TASK-001..021 | 21/21 done |
+| Phase 2: 遥测 agent 组件 | done | `kit/tools/agent/`：AIOS 通用遥测推送组件（读取 runtime → 推送到监控端），随 mkproject 自动分发，消除被监控端安装动作 | hb | TASK-022..029, 035 | 组件文档 + 集成验证通过 |
 
 ## 变更记录
 

@@ -13,6 +13,7 @@ metadata:
   reviewer: any
   parent: TASK-000
   depends-on: []
+  rework-count: 0
   tags: []
 ---
 
@@ -34,8 +35,12 @@ metadata:
 - P0 人工批准记录：不适用（P0 时填写审批工单、PR 或变更单链接）
 
 ## 验收标准
-- [ ] 可验证的条件 1
-- [ ] 可验证的条件 2
+
+> 每条必须**具体可验证**：写明命令/断言/文件与预期结果，禁止占位符（如"可验证的条件 1"）。
+> 一个任务一个可独立验证的交付；预计超过一个 coder 会话（约 >30 分钟）或改动 >5 文件 → 拆任务。
+> 预计改动 >3 文件或跨 >2 模块 → 指定 reviewer 或提高 risk（否则按 fast-path 处理）。
+
+- [ ] 可验证的条件 1（示例：`python3 -c "import x; assert x.y == 1"` 通过）
 - [ ] `config.commands.build` 零错误
 - [ ] `config.commands.check` 通过
 
@@ -50,3 +55,6 @@ metadata:
 
 ## 备注
 已知问题、关键决策。
+
+> `metadata.rework-count`：打回自动累计（`task start` 在 in-review→in-progress 时 +1），
+> 超过 2 次（2→3）被拒绝，需人工介入。详见 `aios/governance/task-policy.md`。

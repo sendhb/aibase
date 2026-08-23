@@ -5,17 +5,17 @@
 > **1 台 Windows 机器**（运行 1 个 Windows 项目实例，通过 agent 推送数据）。
 >
 > 依据（唯一真相）：
-> - `aimonitor/docs/MONITOR-SPEC.md` §3.1（Agent 推送模式契约）
+> - `aimonitor/docs/MONITOR-SPEC.md` §3.1（Agent 推送模式契约）+ §3.2（注册流程）
 > - `aimonitor/docs/OPERATIONS.md`（运维手册）
-> - `aibase/kit/tools/agent/README.md`（agent 组件说明）
-> - 本手册与实现行为逐项核对（2026-08-18）。
+> - `aibase/kit/tools/agent/README.md`（agent 组件说明，含注册章节）
+> - 本手册与实现行为逐项核对（2026-08-21；agent 注册链路 TASK-042~044、分级治理 TASK-047 已落地）。
 
 ---
 
 ## 0. 拓扑总览
 
 ```
-┌───────────────────────── Linux 服务器 monitor01 ─────────────────────────┐
+┌─────────────────────── Linux 服务器 <monitor-server> ───────────────────────┐
 │                                                                          │
 │  aimonitor 服务端 (Python 3.12 stdlib, 0.0.0.0:3113)                     │
 │    config/projects.json   ← 项目注册（local 直读 + agent 接收）            │
@@ -25,18 +25,18 @@
 │        ▲  GET /api/status /api/history /api/projects/:id/events          │
 │        │  POST /api/ingest（Bearer token, 限流, 409 双 agent 冲突检测）   │
 │        │                                                                │
-│  Linux 项目 backend-api（同机，transport: local 直读 runtime/）           │
+│  Linux 项目 <linux-project>（同机，transport: local 直读 runtime/）       │
 └──────────────────────────────────────────────────────────────────────────┘
-        │ POST /api/ingest（http://monitor01:3113/api/ingest）
+        │ POST /api/ingest（http://<monitor-server>:3113/api/ingest）
         │
-┌────────────────────────── Windows 机器 win01 ───────────────────────────┐
-│                                                                          │
-│  aios-agent（常驻进程，Task Scheduler 启动）                              │
-│    读取 C:\srv\win-app\runtime\ 的 TASK/focus/heartbeat/events/计数       │
-│    打包为 AIOS 通用遥测格式 → 推送（每 30s 一轮，指数退避）                │
-│                                                                          │
-│  Windows 项目 win-app（mkproject 生成，kit/ 布局）                        │
-└──────────────────────────────────────────────────────────────────────────┘
+┌────────────────────── Windows 机器 <win-host> ──────────────────────┐
+│                                                                    │
+│  aios-agent（常驻进程，Task Scheduler 启动）                        │
+│    读取 C:\srv\<windows-project>\runtime\ 的                        │
+│    TASK/focus/heartbeat/events/计数（打包 AIOS 遥测 → 推送）         │
+│                                                                    │
+│  Windows 项目 <windows-project>（mkproject 生成，kit/ 布局）        │
+└────────────────────────────────────────────────────────────────────┘
 ```
 
 **核心原则：agent 只搬运不解析**。被监控机器上的 agent 只读 `runtime/` 原始文件并打包推送，
@@ -48,22 +48,22 @@
 
 ### 1.1 软件清单
 
-| 组件 | Linux 服务器（monitor01） | Windows 机器（win01） |
+| 组件 | Linux 服务器（<monitor-server>） | Windows 机器（<win-host>） |
 |------|---------------------------|----------------------|
 | 操作系统 | Debian/Ubuntu 或兼容 | Windows 10/11 |
 | git | ✅ 必需 | ✅ 必需（`winget install Git.Git`） |
 | Python | ✅ 3.10+（推荐 3.12，零第三方依赖） | ✅ 3.10+（`winget install Python.Python.3.12`） |
 | curl | ✅ 健康检查/验证用 | 可选（Windows 10+ 自带 curl.exe） |
 | Docker | 可选（仅 `sandbox-run` 沙箱用，监控链路不需要） | 可选 |
-| 网络 | 固定 IP 或域名；对 win01 开放 TCP 3113 | 能访问 monitor01:3113 |
+| 网络 | 固定 IP 或域名；对 <win-host> 开放 TCP 3113 | 能访问 <monitor-server>:3113 |
 
 ### 1.2 假设
 
-- Linux 服务器 IP：`192.168.1.10`（下文用 `<monitor01>` 表示）
-- Linux 项目：`backend-api`，位于 `~/code/backend-api`
-- Windows 项目：`win-app`，位于 `C:\srv\win-app`
-- Windows 机器主机名：`win01`；Linux 机器主机名：`linux01`
-- 项目 id（**全局唯一，监控端聚合键**）：`linux01:backend-api`、`win01:win-app`
+- Linux 服务器 IP：`192.168.1.10`（下文用 `<monitor-server>` 表示）
+- Linux 项目：`<linux-project>`，位于 `~/code/<linux-project>`
+- Windows 项目：`<windows-project>`，位于 `C:\srv\<windows-project>`
+- Windows 机器主机名：`<win-host>`；Linux 机器主机名：`<linux-host>`
+- 项目 id（**全局唯一，监控端聚合键**）：`<linux-host>:<linux-project>`、`<win-host>:<windows-project>`
 
 > ⚠️ `project_id` 在同一监控端下必须全局唯一，建议格式 `<hostname>:<project>`。
 > 同一 id 只允许一个 agent 推送；两个 agent 抢推同一 id → 服务端返回 **409**。
@@ -101,13 +101,13 @@ cd ~/code/aimonitor
   "alert_stale_task_days": 14,
   "ingest_rate_limit_per_minute": 60,
   "projects": [
-    { "id": "aimonitor", "name": "aimonitor", "path": "/home/hb/code/aimonitor" },
+    { "id": "aimonitor", "name": "aimonitor", "path": "~/code/aimonitor" },
 
-    { "id": "linux01:backend-api", "name": "backend-api",
-      "path": "/home/hb/code/backend-api" },
+    { "id": "<linux-host>:<linux-project>", "name": "<linux-project>",
+      "path": "~/code/<linux-project>" },
 
-    { "id": "win01:win-app", "name": "win-app",
-      "path": "C:/srv/win-app", "transport": "agent" }
+    { "id": "<win-host>:<windows-project>", "name": "<windows-project>",
+      "path": "C:/srv/<windows-project>", "transport": "agent" }
   ]
 }
 ```
@@ -135,9 +135,9 @@ openssl rand -hex 32
 
 ```json
 {
-  "win01": {
+  "<win-host>": {
     "token": "<上面生成的 64 位 hex>",
-    "projects": ["win01:win-app"]
+    "projects": ["<win-host>:<windows-project>"]
   }
 }
 ```
@@ -146,8 +146,8 @@ openssl rand -hex 32
 
 | 格式 | 适用场景 | 示例 |
 |------|---------|------|
-| 扁平 | 每项目独立 token | `{ "win01:win-app": "tok_..." }` |
-| agent | 一 token 管多项目（白名单） | `{ "win01": { "token": "tok_...", "projects": ["win01:win-app"] } }` |
+| 扁平 | 每项目独立 token | `{ "<win-host>:<windows-project>": "tok_..." }` |
+| agent | 一 token 管多项目（白名单） | `{ "<win-host>": { "token": "tok_...", "projects": ["<win-host>:<windows-project>"] } }` |
 
 ```bash
 chmod 600 config/agents.json
@@ -177,22 +177,22 @@ bash scripts/start.sh            # 构建 dist/ → 后台启动 → 健康检�
 
 ```bash
 curl -s http://localhost:3113/api/status | python3 -m json.tool | head -40
-# 浏览器访问 http://192.168.1.10:3113/   （前端仪表盘）
+# 浏览器访问 http://localhost:3113/   （前端仪表盘）
 ```
 
-`/api/status` 应包含 `linux01:backend-api`（local）与 `win01:win-app`（agent，
+`/api/status` 应包含 `<linux-host>:<linux-project>`（local）与 `<win-host>:<windows-project>`（agent，
 当前无记录 → `agent 离线` 属正常，agent 上线后自动恢复）。
 
 ---
 
-## 3. Phase B：Linux 项目实例（backend-api）
+## 3. Phase B：Linux 项目实例（<linux-project>）
 
 ### 3.1 创建项目
 
 ```bash
 # 方式一：mkproject（推荐，kit 布局，自动携带 agent 组件）
-bash ~/aibase/kit/cli/mkproject ~/code/backend-api --profile backend
-cd ~/code/backend-api
+bash ~/aibase/kit/cli/mkproject ~/code/<linux-project> --profile backend
+cd ~/code/<linux-project>
 
 # 方式二：init（把框架安装到已存在的目录）
 python3 ~/aibase/kit/cli/init . --profile backend --non-interactive
@@ -207,7 +207,7 @@ bash kit/cli/protect
 ### 3.2 产生可监控数据（任务 + AI 执行活动）
 
 ```bash
-cd ~/code/backend-api
+cd ~/code/<linux-project>
 # 创建任务（产生 runtime/tasks/TASK-001-*.md）
 bash kit/cli/task new "实现用户登录" --priority P1
 
@@ -238,7 +238,7 @@ bash kit/cli/task review TASK-001       # 写 REVIEW 记录
 curl -s http://localhost:3113/api/status | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
-p=next(x for x in d['projects'] if x['id']=='linux01:backend-api')
+p=next(x for x in d['projects'] if x['id']=='<linux-host>:<linux-project>')
 print('tasks:', len(p.get('tasks',[])), '| error:', p.get('error'))"
 ```
 
@@ -246,7 +246,7 @@ print('tasks:', len(p.get('tasks',[])), '| error:', p.get('error'))"
 
 ---
 
-## 4. Phase C：Windows 项目实例（win-app）
+## 4. Phase C：Windows 项目实例（<windows-project>）
 
 ### 4.1 安装框架（Windows）
 
@@ -271,8 +271,8 @@ winget install Python.Python.3.12
 ### 4.2 创建项目
 
 ```powershell
-python $HOME\.aibase\kit\cli\mkproject C:\srv\win-app --profile backend
-cd C:\srv\win-app
+python $HOME\.aibase\kit\cli\mkproject C:\srv\<windows-project> --profile backend
+cd C:\srv\<windows-project>
 ```
 
 > Windows 用 `python`（不是 `python3`）；所有路径用绝对路径。
@@ -281,42 +281,59 @@ cd C:\srv\win-app
 ### 4.3 产生可监控数据
 
 ```powershell
-cd C:\srv\win-app
+cd C:\srv\<windows-project>
 python kit\cli\task new "实现 Windows 端数据上报" --priority P1
 python kit\cli\task start TASK-001
-# 心跳/事件由 autoloop 产生（autoloop 是 bash 脚本，Windows 上需 Git Bash / WSL 运行；
+# 心跳/事件由 autoloop 产生（autoloop 是 bash 脚本，Windows 上用 Git Bash 原生运行；
 # 若无，agent 仍可推送任务/焦点/计数数据，心跳字段为 null）
 ```
 
 ### 4.4 配置 agent：`C:\etc\agent.json`（机器级，不在项目内）
 
+**方式 A：预配 token（推荐，当前最简可用）**
+
 ```json
 {
-  "server_url": "http://192.168.1.10:3113/api/ingest",
-  "token": "<与 config/agents.json 中 win01 相同的 token>",
+  "server_url": "http://1.1.1.1:3113/api/ingest",
+  "token": "<与 config/agents.json 中 <win-host> 相同的 token>",
   "projects": [
-    { "id": "win01:win-app", "path": "C:/srv/win-app" }
+    { "id": "<win-host>:<windows-project>", "path": "C:/srv/<windows-project>" }
   ],
   "poll_interval_seconds": 30
 }
 ```
 
-字段说明：
+字段说明（方式 A）：
 
 | 字段 | 必填 | 说明 |
 |------|------|------|
 | `server_url` | ✅ | ingest 完整地址（http/https，不含 userinfo） |
 | `token` | ✅ | 与服务端 `config/agents.json` 对应条目一致（Bearer token） |
-| `projects[].id` | ✅ | **必须等于服务端注册的 id**（如 `win01:win-app`） |
+| `projects[].id` | ✅ | **必须等于服务端注册的 id**（如 `<win-host>:<windows-project>`） |
 | `projects[].path` | ✅ | 被监控项目绝对路径（含 `runtime/` 的目录根） |
 | `poll_interval_seconds` | — | 轮询间隔（默认 30） |
+| `state` | — | `active`（缺省，兼容存量）/ `unregistered` / `pending`。方式 A 可省略，等同 active |
+
+**方式 B：注册流程（服务端已支持；agent CLI 提交待接通）**
+
+agent 自 v0.2 起支持**自助注册**（详见 `kit/tools/agent/README.md` 注册章节）：
+
+```
+state=unregistered → 提交注册申请（POST /api/register）→ state=pending
+→ 管理员 dashboard/approve 审批 → 服务端签发 token（写 config/agents.json）
+→ agent 轮询到 approved → 领取 token → state=active → 正式推送
+```
+
+- 服务端：`POST /api/register`、`/approve|/reject|/revoke` 端点已实现（MONITOR-SPEC §3.2，`monitor_server.py`）；审批通过后**自动签发 token 并写入 agents.json**，无需手动预配。
+- agent 侧：`python agent.py --register` 构建注册申请、`--register --status` 查状态、`--register --reset` 重置；pending 轮询领 token 已实现（TASK-043）。
+- ⚠️ **已知延迟**：agent CLI `--register` 的 POST /api/register **提交胶水未接通**（TASK-042 ISSUE-02），当前只构建 payload 不实际提交。完整注册链路待接通后，方式 B 即成为零预配推荐路径。
 
 ```powershell
 # 放好配置后校验（exit 0 = 配置合法）
-python C:\srv\win-app\kit\tools\agent\agent.py --check-config --config C:\etc\agent.json
+python C:\srv\<windows-project>\kit\tools\agent\agent.py --check-config --config C:\etc\agent.json
 
 # 单轮试推（产生一次推送；成功应无 401/网络错误输出）
-python C:\srv\win-app\kit\tools\agent\agent.py --once --config C:\etc\agent.json
+python C:\srv\<windows-project>\kit\tools\agent\agent.py --once --config C:\etc\agent.json
 ```
 
 ### 4.5 部署常驻 agent（Windows Task Scheduler）
@@ -324,11 +341,11 @@ python C:\srv\win-app\kit\tools\agent\agent.py --once --config C:\etc\agent.json
 ```powershell
 # 开机自启常驻（SYSTEM 账户；python.exe 用绝对路径）
 schtasks /Create /TN "AIOS Agent" /SC ONSTART /RU SYSTEM ^
-  /TR "\"C:\Python312\python.exe\" C:\srv\win-app\kit\tools\agent\agent.py --config C:\etc\agent.json"
+  /TR "\"C:\Python312\python.exe\" C:\srv\<windows-project>\kit\tools\agent\agent.py --config C:\etc\agent.json"
 
 # 或按间隔定时单轮（等价 systemd timer）：
 schtasks /Create /TN "AIOS Agent" /SC MINUTE /MO 5 /RU SYSTEM ^
-  /TR "\"C:\Python312\python.exe\" C:\srv\win-app\kit\tools\agent\agent.py --once --config C:\etc\agent.json"
+  /TR "\"C:\Python312\python.exe\" C:\srv\<windows-project>\kit\tools\agent\agent.py --once --config C:\etc\agent.json"
 
 # 立即启动 / 查询 / 停止
 schtasks /Run /TN "AIOS Agent"
@@ -354,13 +371,13 @@ schtasks /End /TN "AIOS Agent"
 | # | 验证项 | 命令 / 位置 | 预期 |
 |---|--------|------------|------|
 | 1 | 服务端在线 | `curl -s http://localhost:3113/api/status` | 200，`projects` 数组含 3 个项目（按 `id` 过滤） |
-| 2 | Linux 项目 local 采集 | status 中 `linux01:backend-api` 条目 | tasks 非空，error 为 null |
+| 2 | Linux 项目 local 采集 | status 中 `<linux-host>:<linux-project>` 条目 | tasks 非空，error 为 null |
 | 3 | agent 配置合法 | `python kit/tools/agent/agent.py --check-config --config C:\etc\agent.json` | exit 0 |
 | 4 | agent 单轮推送 | `... --once --config C:\etc\agent.json` | 无 401/网络错误 |
-| 5 | Windows 项目 agent 采集 | status 中 `win01:win-app` 条目 | 无 `"agent 离线"`，tasks 与 Linux 同结构（`transport: "agent"`） |
-| 6 | 前端仪表盘 | 浏览器 `http://192.168.1.10:3113/` | 三项目可见、心跳存活 |
-| 7 | 事件 API | `curl http://192.168.1.10:3113/api/projects/win01:win-app/events` | 200 |
-| 8 | 历史趋势 | `curl "http://192.168.1.10:3113/api/history?hours=1"` | 有快照点 |
+| 5 | Windows 项目 agent 采集 | status 中 `<win-host>:<windows-project>` 条目 | 无 `"agent 离线"`，tasks 与 Linux 同结构（`transport: "agent"`） |
+| 6 | 前端仪表盘 | 浏览器 `http://localhost:3113/` | 三项目可见、心跳存活 |
+| 7 | 事件 API | `curl http://localhost:3113/api/projects/<win-host>:<windows-project>/events` | 200 |
+| 8 | 历史趋势 | `curl "http://localhost:3113/api/history?hours=1"` | 有快照点 |
 
 ---
 
@@ -373,8 +390,11 @@ schtasks /End /TN "AIOS Agent"
 bash kit/cli/task new "功能描述" --priority P2
 bash kit/cli/task start TASK-001
 bash kit/cli/task verify TASK-001     # 真跑 build/lint/test/check
-bash kit/cli/task review TASK-001
-bash kit/cli/task approve TASK-001
+# 分级治理（TASK-047）：
+#   P2/P3 且未指定 reviewer → fast-path：verify 通过后直接 task done，无需 review
+#   完整路径（P0/P1 或指定 reviewer）→ task review → task approve
+bash kit/cli/task done TASK-001       # fast-path
+# 或：bash kit/cli/task review TASK-001 && bash kit/cli/task approve TASK-001  # 完整路径
 bash kit/cli/autoloop both            # 常驻 coder→reviewer 循环（产生心跳/事件）
 ```
 
@@ -453,7 +473,7 @@ openssl rand -hex 32        # 生成新 token
 服务端 `agents.json` 用 agent 格式给该 token 配多个项目白名单。
 
 **Q4：同一个逻辑项目部署在 Linux 和 Windows 两台机器？**
-两个实例 = 两个独立监控单元，id 各自唯一（如 `linux01:app`、`win01:app`），可用
+两个实例 = 两个独立监控单元，id 各自唯一（如 `<linux-host>:app`、`<win-host>:app`），可用
 `group` 字段分组展示。
 
 **Q5：agent 推送的数据量上限？**
@@ -465,7 +485,7 @@ tasks/events/heartbeats 各 ≤ 50 条；单条 content ≤ 4096 字符（超长
 
 **Q7：Windows 上 autoloop 心跳不产生，会影响监控吗？**
 不影响监控链路。心跳/事件缺失时对应字段为 null，任务/焦点/计数照常推送；
-autoloop 可在 Git Bash/WSL 下运行以产生心跳与事件流。
+autoloop 可在 Git Bash 下原生运行以产生心跳与事件流（TASK-012 起无需 WSL/flock）。
 
 **Q8：改 agents.json 后要重启吗？**
 要。服务端启动时加载一次 agents.json；projects.json 的轮询配置同理（修改后重启生效）。
@@ -483,9 +503,9 @@ autoloop 可在 Git Bash/WSL 下运行以产生心跳与事件流。
   "history_retention_days": 90,
   "ingest_rate_limit_per_minute": 60,
   "projects": [
-    { "id": "aimonitor", "name": "aimonitor", "path": "/home/hb/code/aimonitor" },
-    { "id": "linux01:backend-api", "name": "backend-api", "path": "/home/hb/code/backend-api" },
-    { "id": "win01:win-app", "name": "win-app", "path": "C:/srv/win-app", "transport": "agent" }
+    { "id": "aimonitor", "name": "aimonitor", "path": "~/code/aimonitor" },
+    { "id": "<linux-host>:<linux-project>", "name": "<linux-project>", "path": "~/code/<linux-project>" },
+    { "id": "<win-host>:<windows-project>", "name": "<windows-project>", "path": "C:/srv/<windows-project>", "transport": "agent" }
   ]
 }
 ```
@@ -494,9 +514,9 @@ autoloop 可在 Git Bash/WSL 下运行以产生心跳与事件流。
 
 ```json
 {
-  "win01": {
+  "<win-host>": {
     "token": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-    "projects": ["win01:win-app"]
+    "projects": ["<win-host>:<windows-project>"]
   }
 }
 ```
@@ -505,12 +525,15 @@ autoloop 可在 Git Bash/WSL 下运行以产生心跳与事件流。
 
 ```json
 {
-  "server_url": "http://192.168.1.10:3113/api/ingest",
+  "server_url": "http://localhost:3113/api/ingest",
   "token": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-  "projects": [ { "id": "win01:win-app", "path": "C:/srv/win-app" } ],
-  "poll_interval_seconds": 30
+  "projects": [ { "id": "<win-host>:<windows-project>", "path": "C:/srv/<windows-project>" } ],
+  "poll_interval_seconds": 30,
+  "state": "active"
 }
 ```
+
+> `state` 缺省 `active` 兼容存量；注册流程（方式 B）时可为 `unregistered`/`pending`（见 §4.4）。
 
 ## 附录 B：命令速查
 
@@ -523,7 +546,7 @@ curl -s http://localhost:3113/api/status       # 聚合状态
 openssl rand -hex 32                           # 生成 token
 
 # ── 项目侧（Linux / Git Bash）──
-bash kit/cli/mkproject ~/code/backend-api --profile backend   # 创建项目（Python 跨平台）
+bash kit/cli/mkproject ~/code/<linux-project> --profile backend   # 创建项目（Python 跨平台）
 bash kit/cli/task new "描述" --priority P1
 bash kit/cli/autoloop both
 

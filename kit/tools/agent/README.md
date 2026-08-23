@@ -197,3 +197,168 @@ schtasks /Create /TN "AIOS Agent" /SC ONSTART /RU SYSTEM ^
   条目，各 id 仍须全局唯一。
 - **单项目多实例（HA/负载均衡）**：每个实例用独立 id（如 `my-project-a` /
   `my-project-b` 或主机名后缀），不要共用同一 id。
+
+## 注册（Registration）
+
+> 从 v0.2 起，agent 支持**自助注册**：向 aimonitor 服务端发起注册申请，
+> 管理员审批通过后自动获取 token，无需预先手工配置 token。
+
+### 状态机
+
+```
+unregistered → pending → approved (active)
+                       → rejected → retry
+                       → expired → re-register
+approved → revoked → re-register
+```
+
+- `state=unregistered`：初始状态，无 token，需要注册
+- `state=pending`：已提交注册申请，等待管理员审批
+- `state=active`：已有 token，正常运行（存量 agent 的缺省状态，零迁移）
+
+### agent.json 新增字段
+
+| 字段 | 必填 | 缺省 | 说明 |
+|------|------|------|------|
+| `state` | — | `active` | agent 状态：`unregistered` / `pending` / `active`。缺省 `active` 兼容存量 agent |
+| `req_id` | — | — | 注册成功后服务端返回的申请 ID，pending 状态下存在 |
+| `request_key` | — | — | agent 自生成的随机密钥，用于轮询时绑定身份（pending 状态下存在） |
+
+`state=unregistered` 时，`token` 字段可为空；`state=active` 时，`token` 必填（与现有校验一致）。
+
+示例（注册前）：
+```json
+{
+  "server_url": "http://aimonitor.local:3113/api/ingest",
+  "state": "unregistered",
+  "projects": [
+    {"id": "my-machine:my-project", "path": "/home/user/code/my-project"}
+  ],
+  "poll_interval_seconds": 30
+}
+```
+
+示例（注册后，pending）：
+```json
+{
+  "server_url": "http://aimonitor.local:3113/api/ingest",
+  "state": "pending",
+  "req_id": "<server-returned-uuid>",
+  "request_key": "<agent-generated-secret>",
+  "projects": [
+    {"id": "my-machine:my-project", "path": "/home/user/code/my-project"}
+  ],
+  "poll_interval_seconds": 30
+}
+```
+
+示例（注册成功，active）：
+```json
+{
+  "server_url": "http://aimonitor.local:3113/api/ingest",
+  "token": "aimon_my-machine:my-project_xxx_yyy",
+  "state": "active",
+  "projects": [
+    {"id": "my-machine:my-project", "path": "/home/user/code/my-project"}
+  ],
+  "poll_interval_seconds": 30
+}
+```
+
+### CLI 注册命令
+
+```bash
+python3 agent.py --register [--config agent.json]
+# unregistered：构建申请 → POST /api/register 提交 → 成功写 pending（req_id/request_key）→ 进入轮询
+#   （失败不修改 agent.json：409 已注册/已有申请、4xx 不可重试、5xx/网络可重试）
+# pending：输出“正在等待审批（req_id: xxx）”并进入轮询
+# active：输出“已注册，无需重复注册”
+
+python3 agent.py --register --status [--config agent.json]
+# 查看当前注册状态（unregistered/pending/active）
+
+python3 agent.py --register --reset [--config agent.json]
+# 恢复被污染/卡死的 pending → unregistered（清除 req_id/request_key）
+```
+
+> 注：`--enrollment-code` 尚未接线 CLI（`build_register_payload` 构造层已支持，后续版本开放）。
+
+### 注册端点契约
+
+> ✅ 契约状态：`POST /api/register` 提交胶水已接通（TASK-014）——`agent.py --register` 在
+> state=unregistered 时构建 payload → `submit_register()` POST /api/register → 成功写
+> pending（req_id/request_key 入 agent.json）→ 进入轮询（TASK-043）。
+
+#### `POST /api/register`
+
+向 aimonitor 服务端发起注册申请（CLI 已接线，TASK-014）。
+
+URL 推导：从 `server_url`（如 `http://aimonitor.local:3113/api/ingest`）替换路径为 `/api/register`。
+
+请求体（`build_register_payload()` 构造，对齐 aimonitor MONITOR-SPEC §3.2）：
+```json
+{
+  "project_id": "my-machine-my-project",
+  "path": "/home/user/code/my-project",
+  "request_key": "<agent生成的随机密钥>",
+  "host_info": "hostname:my-machine, ip:192.168.1.5",
+  "enrollment_code": "ABC123-XYZ789"
+}
+```
+
+| 字段 | 必填 | 说明 |
+|------|------|------|
+| `project_id` | ✅ | 实例级唯一 id（**仅字母数字连字符**，服务端 `^[a-zA-Z0-9-]+$`），与 agent.json 中 projects[].id 一致 |
+| `path` | ✅ | 被监控项目路径 |
+| `request_key` | ✅ | 自生成随机密钥（token_urlsafe(24)，24 字节熵/32 字符），用于轮询时绑定身份 |
+| `host_info` | ✅ | 机器标识**字符串**：`hostname:<h>, ip:<ip>`（ip 缺省可省略） |
+| `enrollment_code` | — | 可选，预授权注册码（管理员提供） |
+
+响应：
+
+| 状态码 | 响应体 | agent 行为 |
+|--------|--------|-----------|
+| 201 | `{ "req_id": "<uuid>", "status": "pending", "pending_since": <epoch> }` | 保存 req_id，切换到 pending 状态，开始轮询 |
+| 409 | `{ "error": "...", "existing": "active\|pending" }` | 已注册 → 提示用户；已存在 pending → 继续轮询旧 req_id |
+| 400/429 | `{ "error": "..." }` | 退避重试 |
+
+#### `GET /api/register/:req_id/status`
+
+轮询审批结果。
+
+URL：`GET <server_url_base>/api/register/<req_id>/status?request_key=<key>`
+
+| 状态码 | 响应体 | agent 行为 |
+|--------|--------|-----------|
+| 200 pending | `{ "status": "pending", "pending_since": <epoch> }` | 继续轮询（间隔 30s） |
+| 200 approved | `{ "status": "approved", "token": "<token>", "project_id": "<id>" }` | 保存 token，写入 agent.json，切换 state=active，开始正式推送 |
+| 200 rejected | `{ "status": "rejected", "reason": "..." }` | 打印错误，退出（或等待人工介入） |
+| 200 expired | `{ "status": "expired" }` | 提示重新注册 |
+| 200 revoked | `{ "status": "revoked" }` | 提示重新注册 |
+| 404 | — | request_key 不匹配或 req_id 不存在 → 退避重试 |
+
+### Token 格式
+
+```
+aimon_{project_id}_{uuid4}_{random_hex}
+```
+
+示例：`aimon_my-machine:my-project_550e8400-e29b-41d4-a716-446655440000_a1b2c3d4`
+
+- 前缀 `aimon_` 便于识别来源
+- 中段 `project_id` 便于审计
+- 后段 `uuid4` + `random_hex` 保证不可猜测
+
+### 轮询失败处理
+
+| 失败类型 | 行为 |
+|---------|------|
+| 网络错误/超时 | 指数退避（复用现有 `agent_retry.py`），最长 60s cap |
+| 4xx（不含 404） | 不重试，打印错误，退出 |
+| 404 | 退避重试（可能 req_id 尚未同步），3 次后退出 |
+| pending TTL 超时（缺省 7 天） | 打印提示，退出（重新注册） |
+
+### 依赖
+
+agent 注册功能依赖 aimonitor 服务端 `TASK-046..054`（注册-审批-签发 API）。
+注册端点契约与 aimonitor `docs/MONITOR-SPEC.md §3.2` 对齐。

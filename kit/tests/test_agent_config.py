@@ -168,6 +168,75 @@ class AgentConfigTests(unittest.TestCase):
             out = agent_config.load_config(path)
             self.assertEqual(out["server_url"], "https://aimonitor.example.com/api/ingest")
 
+    # ---- TASK-042: state 字段校验 ----
+
+    def test_state_defaults_to_active(self):
+        """缺省 state 字段 → 默认 active。"""
+        out = agent_config.validate(valid_cfg())
+        self.assertEqual(out["state"], "active")
+
+    def test_state_explicit_active(self):
+        """state=active 显式设置。"""
+        out = agent_config.validate(valid_cfg(state="active"))
+        self.assertEqual(out["state"], "active")
+
+    def test_state_unregistered_allows_empty_token(self):
+        """state=unregistered 时 token 可为空。"""
+        out = agent_config.validate(valid_cfg(state="unregistered", token=None))
+        self.assertEqual(out["state"], "unregistered")
+        self.assertIsNone(out["token"])
+
+    def test_state_unregistered_with_token(self):
+        """state=unregistered 时允许预填 token。"""
+        out = agent_config.validate(valid_cfg(state="unregistered", token="pre-filled"))
+        self.assertEqual(out["state"], "unregistered")
+        self.assertEqual(out["token"], "pre-filled")
+
+    def test_state_pending_allows_empty_token(self):
+        """state=pending 时 token 可为空。"""
+        out = agent_config.validate(valid_cfg(state="pending", token=None))
+        self.assertEqual(out["state"], "pending")
+        self.assertIsNone(out["token"])
+
+    def test_state_pending_with_req_id(self):
+        """state=pending 时 req_id/request_key 被保留。"""
+        out = agent_config.validate(valid_cfg(
+            state="pending", token=None, req_id="req-abc", request_key="key-xyz"
+        ))
+        self.assertEqual(out["state"], "pending")
+        self.assertEqual(out["req_id"], "req-abc")
+        self.assertEqual(out["request_key"], "key-xyz")
+
+    def test_state_active_requires_token(self):
+        """state=active 且 token 为空 → 校验报错。"""
+        cfg = valid_cfg(state="active")
+        del cfg["token"]
+        with self.assertRaises(agent_config.AgentConfigError) as cm:
+            agent_config.validate(cfg)
+        self.assertIn("token", str(cm.exception))
+        self.assertIn("active", str(cm.exception))
+
+    def test_state_invalid_rejected(self):
+        """state 非法值 → 校验报错。"""
+        for bad in ("invalid", "registered", "", 123):
+            with self.assertRaises(agent_config.AgentConfigError) as cm:
+                agent_config.validate(valid_cfg(state=bad))
+            self.assertIn("state", str(cm.exception).lower())
+
+    def test_req_id_ignored_when_not_pending(self):
+        """state=active/unregistered 时 req_id/request_key 被忽略。"""
+        for s in ("active", "unregistered"):
+            out = agent_config.validate(valid_cfg(state=s, req_id="keep", request_key="keep"))
+            self.assertIsNone(out["req_id"], f"state={s}: req_id 应被忽略")
+            self.assertIsNone(out["request_key"], f"state={s}: request_key 应被忽略")
+
+    def test_state_in_output(self):
+        """返回的规范化配置含 state/req_id/request_key 字段。"""
+        out = agent_config.validate(valid_cfg())
+        self.assertIn("state", out)
+        self.assertIn("req_id", out)
+        self.assertIn("request_key", out)
+
 
 class AgentCliTests(unittest.TestCase):
     """子进程验证 CLI：缺失字段 → stderr 报错 + exit 1。"""
@@ -183,7 +252,7 @@ class AgentCliTests(unittest.TestCase):
     def run_cli(self, path):
         return subprocess.run(
             [sys.executable, self.AGENT, "--check-config", "--config", path],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
         )
 
     def test_missing_fields_exit_1(self):

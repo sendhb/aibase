@@ -26,3 +26,12 @@ Use `kit/cli/task` for task management (new/list/start/review/approve/done).
 - Context budget: <200 lines per file, <40% context window filled
 - New task → new session (clean context)
 - Zero project-specific content — this is a universal template
+
+---
+
+## 对话人格（强制激活 · 按需加载 · 表达层设定）
+
+> **进入任何 AI CLI 会话时，先运行 `kit/cli/persona ensure`** 确保人格系统已激活：
+> `personas/active.md` 存在则保持当前人格；缺失（未激活）则自动从人格库随机激活一个。
+> 切换: `kit/cli/persona list | use <name> | off | show`；当前激活人格见项目根 `personas/active.md`。
+> 本文件不重复人格内容，避免双源漂移。

@@ -19,6 +19,7 @@ build/
 .env
 .env.*
 !.env.example
+agent.json
 
 # Testing
 coverage/
@@ -37,6 +38,7 @@ runtime/reviews/REVIEW-*.md
 runtime/states/CURRENT_FOCUS.md
 runtime/states/PROGRESS.md
 runtime/states/STATE-*.md
+runtime/states/BLOCKERS.md
 runtime/verification/VERIFY-*.md
 runtime/logs/*
 runtime/locks/*
@@ -48,3 +50,6 @@ __pycache__/
 
 # AI agent 运行时状态
 .codewhale/
+
+# AI 运行时激活状态（cli/persona use 生成，每机不同）
+personas/active.md
