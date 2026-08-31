@@ -34,11 +34,14 @@
 用法：
 
 ```bash
-bash cli/autoloop-coder    --interval 300 --unattended --id coder-1
-bash cli/autoloop-reviewer --interval 300 --unattended --id reviewer-1
+python kit/cli/autoloop coder    --interval 300 --unattended --id coder-1
+python kit/cli/autoloop reviewer --interval 300 --unattended --id reviewer-1
 ```
 
-**⚠️ `--unattended` 会给 `claude -p` 传 `--dangerously-skip-permissions`，agent 将不经确认执行任意文件写/shell 操作。仅在隔离环境（容器/git worktree/一次性沙箱）中启用，并确保有独立版本控制可随时回滚。** 用 `cli/sandbox-run -- bash cli/autoloop-coder --once --unattended` 就是这样的隔离环境。P0 风险任务（`aios/governance/risk-policy.md`）不会被自动实现或自动 approve —— 缺少 `approval-ref` 时脚本会把任务转 `blocked` 并停止，等待人工。
+> 兼容 shim（TASK-026）：`python kit/cli/autoloop-coder ...` / `python
+> kit/cli/autoloop-reviewer ...` 等价于上面的 `autoloop coder\|reviewer ...`。
+
+**⚠️ `--unattended` 会给 `claude -p` 传 `--dangerously-skip-permissions`，agent 将不经确认执行任意文件写/shell 操作。仅在隔离环境（容器/git worktree/一次性沙箱）中启用，并确保有独立版本控制可随时回滚。** 用 `cli/sandbox-run -- python kit/cli/autoloop coder --once --unattended` 就是这样的隔离环境。P0 风险任务（`aios/governance/risk-policy.md`）不会被自动实现或自动 approve —— 缺少 `approval-ref` 时脚本会把任务转 `blocked` 并停止，等待人工。
 
 ## 机械强制层（跟具体 AI 工具无关）
 

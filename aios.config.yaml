@@ -17,5 +17,5 @@ generated_dirs:
 commands:
   build: "true"
   lint: "true"
-  test: "python3 -m unittest discover -s kit/tests"
+  test: "python -m unittest discover -s kit/tests || python3 -m unittest discover -s kit/tests"
   check: "bash kit/cli/check"

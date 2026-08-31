@@ -47,11 +47,13 @@ class AgentConfigTests(unittest.TestCase):
         del cfg["poll_interval_seconds"]
         self.assertEqual(agent_config.validate(cfg)["poll_interval_seconds"],
                          agent_config.DEFAULT_POLL_INTERVAL_SECONDS)
-        self.assertEqual(agent_config.DEFAULT_POLL_INTERVAL_SECONDS, 30)
+        # TASK-086 perf：默认 30s → 10s（提交 2602bcd）；TASK-081 测试对齐
+        self.assertEqual(agent_config.DEFAULT_POLL_INTERVAL_SECONDS, 10)
 
     def test_default_poll_interval_when_null(self):
         out = agent_config.validate(valid_cfg(poll_interval_seconds=None))
-        self.assertEqual(out["poll_interval_seconds"], 30)
+        self.assertEqual(out["poll_interval_seconds"],
+                         agent_config.DEFAULT_POLL_INTERVAL_SECONDS)
 
     def test_missing_server_url(self):
         cfg = valid_cfg()

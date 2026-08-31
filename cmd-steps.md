@@ -1,6 +1,6 @@
 # cmd-steps — AIOS 框架命令行速查（Linux / Windows）
 
-> 全部命令位于 `kit/cli/`。**Python3 命令**：Linux/Windows 原生可跑；**Bash 命令**：
+> 框架 CLI 主要位于 `kit/cli/`；agent/dispatcher 位于 `kit/tools/`。**Python3 命令**：Linux/Windows 原生可跑；**Bash 命令**：
 > Linux 原生，Windows 请在 Git Bash / MSYS / WSL 下执行。
 >
 > ⚠️ `task` 是 python3 脚本，必须 `kit/cli/task ...` 或 `python3 kit/cli/task ...`
@@ -53,18 +53,110 @@
 | `python3 kit/tools/agent/agent.py [--config agent.json] [--once] [--interval N] [--quiet]` | 启动监控推送（默认常驻 30s 轮询；--once 单轮适合 cron/systemd） |
 | `python3 kit/tools/agent/agent.py --check-config [--config agent.json]` | 只校验配置（exit 0/1） |
 
-## 五、无人值守循环（autoloop，Bash）
+## 五、多项目自动调度（dispatcher，Python3）
+
+> 位置：`kit/tools/dispatcher/dispatcher.py`（Phase 3 中央调度器）。
+> 注册表：`projects.json`（默认 `~/code/aimonitor/config/projects.json`，可用 `--config` 覆盖）。
+> 调度状态：默认 `<项目根>/runtime/logs/dispatcher`，可用 `--state-dir` 覆盖。
+
+### 常用命令
 
 | 命令 | 简介 |
 |------|------|
-| `kit/cli/autoloop <coder\|reviewer\|both\|stop> [--interval] [--once] [--foreground] [--id] [--timeout]` | 循环启动器（常驻 both 默认后台；--foreground 前台配合 tmux） |
-| `kit/cli/autoloop-coder [--interval] [--once] [--unattended] [--id] [--timeout]` | 无人值守 Coder 循环（实验性） |
-| `kit/cli/autoloop-reviewer [--interval] [--once] [--unattended] [--id] [--timeout]` | 无人值守 Reviewer 循环（实验性） |
+| `python3 kit/tools/dispatcher/dispatcher.py list --config <projects.json>` | 查看项目注册表 / transport / 可达性 |
+| `python3 kit/tools/dispatcher/dispatcher.py scan --config <projects.json>` | 扫描本地项目 `runtime/tasks/` 状态（只读） |
+| `python3 kit/tools/dispatcher/dispatcher.py dispatch --once --dry-run --config <projects.json> --max-workers 1` | 调度预演：只报候选与治理判定，不执行命令、不修改状态 |
+| `python3 kit/tools/dispatcher/dispatcher.py dispatch --once --config <projects.json> --max-workers 1` | 真正跑一轮调度：open→start+coder；in-progress→coder |
+| `python3 kit/tools/dispatcher/dispatcher.py status --config <projects.json> --state-dir <dir> --task-timeout 1800` | 查看调度状态 / 分配 / 超时回收 |
+| `python3 kit/tools/dispatcher/dispatcher.py monitor --config <projects.json> --state-dir <dir> --monitor-config <agent.json>` | 推送调度心跳 / 事件 / 治理告警到 aimonitor |
+| `python3 kit/tools/dispatcher/dispatcher.py downlink --config <projects.json> --path <项目路径> --command bash --arg kit/cli/check` | 手动在指定项目内执行命令（路径必须属于注册表） |
+
+### 典型操作流程
+
+1. 查看项目注册表：
+
+```bash
+python3 kit/tools/dispatcher/dispatcher.py list \
+  --config ~/code/aimonitor/config/projects.json
+```
+
+2. 扫描各项目任务状态：
+
+```bash
+python3 kit/tools/dispatcher/dispatcher.py scan \
+  --config ~/code/aimonitor/config/projects.json
+```
+
+3. 先做安全预演（推荐）：
+
+```bash
+python3 kit/tools/dispatcher/dispatcher.py dispatch --once --dry-run \
+  --config ~/code/aimonitor/config/projects.json \
+  --max-workers 1
+```
+
+4. 真正跑一轮调度：
+
+```bash
+python3 kit/tools/dispatcher/dispatcher.py dispatch --once \
+  --config ~/code/aimonitor/config/projects.json \
+  --max-workers 1
+```
+
+5. 查看调度状态：
+
+```bash
+python3 kit/tools/dispatcher/dispatcher.py status \
+  --config ~/code/aimonitor/config/projects.json \
+  --state-dir runtime/logs/dispatcher
+```
+
+6. 接入 aimonitor 观测（可选）：
+
+```bash
+python3 kit/tools/dispatcher/dispatcher.py monitor \
+  --config ~/code/aimonitor/config/projects.json \
+  --state-dir runtime/logs/dispatcher \
+  --monitor-config ~/code/aimonitor/config/agent.json
+```
+
+### 常用参数
+
+| 参数 | 作用 | 默认 |
+|------|------|------|
+| `--config` | `projects.json` 路径 | `~/code/aimonitor/config/projects.json` |
+| `--max-workers` | 全局并发上限 | `1` |
+| `--state-dir` | 调度状态 / 事件存放目录 | `<项目根>/runtime/logs/dispatcher` |
+| `--task-timeout` | 任务超时秒数，超时标记 stale 可回收 | `1800` |
+| `--timeout` | 单条下行命令超时秒数 | `1800` |
+| `--rebuild` | 从各项目 `runtime/tasks/` 重建调度状态 | 关闭 |
+| `--dry-run` | 只报判定，不执行命令、不修改状态 | 关闭 |
+
+### 当前限制
+
+- 只调度 `transport` 为 `local` 的项目；`agent` 远端项目会跳过并告警
+- v1 policy 只选 `open` / `in-progress`；`in-review` 自动审查是保留分支，当前不触发
+- 没有 `open` / `in-progress` 任务时，`dispatch` 会提示“无候选任务”
+- 治理仍然生效：P0 无 `approval-ref`、`rework-count ≥ 3` 会拦截转人工
+- 中央不直接写远端任务文件，只调用目标项目本地 `task` / `autoloop-coder` / `autoloop-reviewer`
+
+## 六、无人值守循环（autoloop，Python3）
+
+| 命令 | 简介 |
+|------|------|
+| `python kit/cli/autoloop <coder\|reviewer\|both\|stop> [--interval] [--once] [--foreground] [--id] [--timeout]` | 循环启动器（常驻 both 默认后台；--foreground 前台配合 tmux） |
+| `python kit/cli/autoloop coder [--interval] [--once] [--unattended] [--id] [--timeout]` | 无人值守 Coder 循环（实验性） |
+| `python kit/cli/autoloop reviewer [--interval] [--once] [--unattended] [--id] [--timeout]` | 无人值守 Reviewer 循环（实验性） |
+
+> 兼容 shim（TASK-026）：`python kit/cli/autoloop-coder ...` / `python
+> kit/cli/autoloop-reviewer ...` 等价于 `autoloop coder\|reviewer ...`（旧入口名
+> 保留，内部已迁 Python）。**不要 `bash kit/cli/autoloop*`**——会把 Python 源码当
+> shell 逐行解析（同上文 `task` 的警告）。
 
 - 两循环独立进程，只通过 `runtime/tasks/` 文件耦合（生成者 ≠ 审查者）
 - 模型配置：各自启动时设 `ANTHROPIC_MODEL` 环境变量（如 `ANTHROPIC_MODEL=claude-sonnet-4-5`）
 
-## 六、人格与版本发布（Python3）
+## 七、人格与版本发布（Python3）
 
 | 命令 | 简介 |
 |------|------|
@@ -73,7 +165,7 @@
 | `kit/cli/publish <共享目录> [--version] [--include <目录>...]` | 冻结当前项目内容打包 + manifest，发布到共享位置 |
 | `kit/cli/sync <共享目录> [--package-name] [--version] [--dest]` | 按 manifest 从共享位置拉取指定版本到本地（单向显式同步） |
 
-## 七、自动触发（非手动命令）
+## 八、自动触发（非手动命令）
 
 | Hook | 作用 |
 |------|------|
@@ -87,4 +179,4 @@
 - `--unattended` 会给 claude 传 `--dangerously-skip-permissions`，**仅隔离环境使用**
 - `autoloop-*` 依赖 Claude Code CLI；`sandbox-*` 依赖 Docker
 - 除 `autoloop-*`（内部调 claude -p）外，其余命令零网络依赖
-- `kit/tools/` 仅 `agent/` 含可执行 CLI（注册监控）；`browser/filesystem/shell/database/sandbox/git/unity/unreal/docker` 为能力文档；`kit/aios/`、`kit/agents/` 为治理/角色说明，非可执行命令
+- `kit/tools/` 含可执行 CLI：`agent/`（注册监控）、`dispatcher/`（Phase 3 调度器）；`browser/filesystem/shell/database/sandbox/git/unity/unreal/docker` 为能力文档；`kit/aios/`、`kit/agents/` 为治理/角色说明，非可执行命令

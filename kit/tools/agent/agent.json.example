@@ -4,6 +4,6 @@
   "projects": [
     {"id": "my-project", "path": "/absolute/path/to/my-project"}
   ],
-  "poll_interval_seconds": 30,
+  "poll_interval_seconds": 10,
   "state": "active"
 }

@@ -49,28 +49,13 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-
-def find_project_root(start):
-    """从脚本位置向上寻找项目根（含 aios.config.yaml 的目录）。
-
-    兼容两种布局：
-      - 平铺：<root>/cli/task （当前库自举，向上 2 级）
-      - kit 子目录：<root>/kit/cli/task（向上 3 级）
-    以 aios.config.yaml 所在目录为准，避免硬编码层级。
-    """
-    d = os.path.dirname(os.path.abspath(start))
-    while True:
-        if os.path.isfile(os.path.join(d, "aios.config.yaml")):
-            return d
-        parent = os.path.dirname(d)
-        if parent == d:
-            break
-        d = parent
-    # 回退：向上两级（kit/cli/task → repo root 的兼容层）
-    return os.path.dirname(os.path.dirname(os.path.abspath(start)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
+import config as cfg_lib  # noqa: E402
+import tasklib  # noqa: E402  （任务读写/状态机/治理判断，TASK-021）
 
 
-AI_DIR = find_project_root(__file__)
+# 项目根与运行时目录（tasklib 以参数复用；测试可覆写这些模块级目录变量）
+AI_DIR = tasklib.find_project_root(__file__)
 RUNTIME_DIR = os.path.join(AI_DIR, "runtime")
 TASKS_DIR = os.path.join(RUNTIME_DIR, "tasks")
 STATE_DIR = os.path.join(RUNTIME_DIR, "states")
@@ -84,204 +69,63 @@ KIT_RUNTIME_TEMPLATE = os.path.join(AI_DIR, "kit", "runtime", "tasks", "TASK.tem
 if not os.path.exists(TEMPLATE) and os.path.exists(KIT_RUNTIME_TEMPLATE):
     TEMPLATE = KIT_RUNTIME_TEMPLATE
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
-import config as cfg_lib  # noqa: E402
-
-STATUSES = ["open", "in-progress", "in-review", "blocked", "done", "cancelled"]
-REWORK_LIMIT = 2  # 自动返工上限：rework-count 0→1→2 允许，2→3 拒绝（TASK-047）
-TRANSITIONS = {
-    "open": ["in-progress", "blocked", "cancelled"],
-    "in-progress": ["in-review", "done", "blocked", "cancelled"],
-    "in-review": ["done", "in-progress", "blocked"],
-    "blocked": ["in-progress"],
-    "done": [],
-    "cancelled": [],
-}
-TASK_RE = re.compile(r"^TASK-(\d{3})-[a-z0-9-]+\.md$")
-
-
-def today():
-    return datetime.date.today().isoformat()
-
-
-def parse_frontmatter(text):
-    """返回 (flat_dict, body_start_index)。flat_dict 键如 'name', 'metadata.status'。"""
-    lines = text.splitlines()
-    if not lines or lines[0].strip() != "---":
-        return None, 0
-    end = None
-    for i in range(1, len(lines)):
-        if lines[i].strip() == "---":
-            end = i
-            break
-    if end is None:
-        return None, 0
-    fm, section = {}, None
-    for line in lines[1:end]:
-        s = line.strip()
-        if not s or s.startswith("#"):
-            continue
-        m = re.match(r"^([A-Za-z0-9_-]+):\s*(.*)$", s)
-        if not m:
-            continue
-        key, val = m.group(1), m.group(2).strip()
-        if key == "metadata":
-            section = "metadata"
-            continue
-        if val == "":
-            continue
-        if val.startswith("[") and val.endswith("]"):
-            val = val[1:-1].split(",") if val[1:-1].strip() else []
-            val = [v.strip() for v in val]
-        full = f"{section}.{key}" if section else key
-        fm[full] = val
-    return fm, end
-
-
-def load_task(path):
-    with open(path, encoding="utf-8") as f:
-        text = f.read()
-    fm, _ = parse_frontmatter(text)
-    return text, fm
+# ---- 任务读写 / 状态机 / 治理判断：全部复用 tasklib（TASK-021），CLI 对外契约不变 ----
+STATUSES = tasklib.STATUSES
+REWORK_LIMIT = tasklib.REWORK_LIMIT
+TRANSITIONS = tasklib.TRANSITIONS
+TASK_RE = tasklib.TASK_RE
+today = tasklib.today
+parse_frontmatter = tasklib.parse_frontmatter
+load_task = tasklib.load_task
+short_id = tasklib.short_id
+die = tasklib.die
+bump_rework = tasklib.bump_rework
+evidence_exists = tasklib.evidence_exists
+_event_last_seq = tasklib._event_last_seq
 
 
 def task_files():
-    if not os.path.isdir(TASKS_DIR):
-        return []
-    return sorted(f for f in os.listdir(TASKS_DIR) if TASK_RE.match(f))
+    return tasklib.task_files(TASKS_DIR)
 
 
 def find_task(task_id):
-    for f in task_files():
-        if f.startswith(task_id + "-") or f == task_id + ".md":
-            return os.path.join(TASKS_DIR, f)
-    return None
-
-
-def set_status(path, new_status, force=False, require_review=False):
-    text, fm = load_task(path)
-    if fm is None:
-        die(f"frontmatter 缺失或损坏: {path}")
-    cur = fm.get("metadata.status")
-    if cur == new_status:
-        print(f"已是 {new_status}: {os.path.basename(path)}")
-        return
-    if not force and new_status not in TRANSITIONS.get(cur or "", []):
-        die(f"非法状态转换: {cur} → {new_status}（允许: {TRANSITIONS.get(cur or '', [])}）")
-    if new_status == "done" and not force:
-        # 处于 in-review 的任务直接 done 也强制要求审查记录
-        check_done_prereqs(path, fm, require_review=require_review or cur == "in-review")
-    lines = text.splitlines()
-    out = []
-    updated = False
-    for line in lines:
-        if re.match(r"^\s*status:\s*", line) and not updated:
-            out.append(f"  status: {new_status}")
-            updated = True
-            continue
-        if re.match(r"^\s*updated:\s*", line):
-            out.append(f"  updated: {today()}")
-            continue
-        out.append(line)
-    with open(path, "w", encoding="utf-8") as f:
-        f.write("\n".join(out))
-    print(f"✓ {os.path.basename(path)} → {new_status}")
-
-
-def check_done_prereqs(path, fm, require_review=False):
-    with open(path, encoding="utf-8") as f:
-        text = f.read()
-    unchecked = [l for l in text.splitlines() if re.match(r"^\s*- \[ \]", l)]
-    if unchecked:
-        die(f"还有 {len(unchecked)} 条验收标准未勾选:\n" + "\n".join("  " + l.strip() for l in unchecked[:8]))
-    ref = fm.get("name")
-    name = os.path.basename(path)[:-3]
-    if not (ref and verify_exists(ref)) and not verify_exists(name):
-        die(f"未找到引用 {ref or name} 的 VERIFY 记录（runtime/verification/）。先写验证记录，或加 --force。")
-    # 审查前置：任务处于 in-review，或 reviewer 明确指定（非 any/none/空）时，必须有 REVIEW 记录
-    risk = (fm.get("metadata.risk") or "P2").upper()
-    if risk == "P0" and (fm.get("metadata.approval-ref") or "none").strip().lower() in ("", "none", "n/a"):
-        die(f"{ref or name}: P0 任务缺少人工批准引用 metadata.approval-ref")
-    reviewer = (fm.get("metadata.reviewer") or "any").strip()
-    priority = (fm.get("metadata.priority") or "P2").upper()
-    needs_review = require_review or risk in ("P0", "P1") or priority in ("P0", "P1") or reviewer not in ("", "any", "none")
-    if needs_review and not (ref and review_exists(ref, fm)) and not review_exists(name, fm):
-        why = "任务处于 in-review" if require_review else f"reviewer={reviewer}"
-        die(f"{ref or name}: {why}，但未找到 REVIEW 记录（runtime/reviews/ 中 task-ref 引用）。"
-            f"先写审查记录（task review → runtime/reviews/REVIEW-xxx.md → task approve），或加 --force。")
-
-
-def short_id(ref):
-    m = re.match(r"^(TASK-\d{3})", ref or "")
-    return m.group(1) if m else None
-
-
-def evidence_exists(directory, prefix, ref, record_type, ref_date=None):
-    """Return true only for a current, passing, well-formed evidence record.
-
-    ref_date: 证据日期必须匹配的日期（默认 today()）。校验 done 任务时传任务
-    metadata.updated（完成当天），避免历史任务被“运行日”误判；done/approve
-    路径发生在当下，仍用 today()。
-    """
-    if not os.path.isdir(directory):
-        return False
-    short = short_id(ref)
-    ref_date = ref_date or today()
-    for filename in os.listdir(directory):
-        if not filename.startswith(prefix) or not filename.endswith(".md"):
-            continue
-        path = os.path.join(directory, filename)
-        with open(path, encoding="utf-8") as fh:
-            raw = fh.read()
-        if not raw.lstrip().startswith("---"):
-            continue
-        fm, _ = parse_frontmatter(raw)
-        if not fm or fm.get("metadata.type") != record_type:
-            continue
-        # required fields: name, description, date, task-ref, result
-        if not fm.get("name") or not fm.get("description"):
-            continue
-        if not fm.get("metadata.verifier") or not fm.get("metadata.commit"):
-            continue
-        if fm.get("metadata.date") != ref_date or fm.get("metadata.result") != "pass":
-            continue
-        task_ref = fm.get("metadata.task-ref", "")
-        if task_ref == ref or (short and task_ref == short):
-            return fm
-    return False
+    return tasklib.find_task(task_id, TASKS_DIR)
 
 
 def verify_exists(ref, ref_date=None):
-    return bool(evidence_exists(VERIFY_DIR, "VERIFY-", ref, "verify", ref_date))
+    return tasklib.verify_exists(ref, VERIFY_DIR, ref_date)
 
 
 def review_exists(ref, task_fm=None, ref_date=None):
-    if not os.path.isdir(REVIEW_DIR):
-        return False
-    short = short_id(ref)
-    task_author = ((task_fm or {}).get("metadata.assignee") or "").strip()
-    ref_date = ref_date or today()
-    for filename in os.listdir(REVIEW_DIR):
-        if not filename.startswith("REVIEW-") or not filename.endswith(".md"):
-            continue
-        with open(os.path.join(REVIEW_DIR, filename), encoding="utf-8") as fh:
-            fm, _ = parse_frontmatter(fh.read())
-        if not fm or fm.get("metadata.type") != "review":
-            continue
-        if fm.get("metadata.date") != ref_date or fm.get("metadata.result") != "pass":
-            continue
-        task_ref = fm.get("metadata.task-ref", "")
-        if task_ref != ref and not (short and task_ref == short):
-            continue
-        reviewer = (fm.get("metadata.reviewer") or "").strip()
-        author = (fm.get("metadata.implementation-author") or "").strip()
-        if reviewer and author and reviewer != author and (not task_author or task_author == "any" or reviewer != task_author):
-            return True
-    return False
+    return tasklib.review_exists(ref, REVIEW_DIR, task_fm, ref_date)
 
-def die(msg, code=1):
-    print(f"✗ {msg}", file=sys.stderr)
-    sys.exit(code)
+
+def check_done_prereqs(path, fm, require_review=False):
+    return tasklib.check_done_prereqs(path, fm, VERIFY_DIR, REVIEW_DIR, require_review=require_review)
+
+
+def set_status(path, new_status, force=False, require_review=False, ev=None, reason=None):
+    return tasklib.set_status(path, new_status, verify_dir=VERIFY_DIR, review_dir=REVIEW_DIR,
+                              log_dir=LOG_DIR, root=AI_DIR, force=force,
+                              require_review=require_review, ev=ev, reason=reason)
+
+
+def events_path():
+    return tasklib.events_path(LOG_DIR)
+
+
+def append_event(ev, task_id, from_status=None, to_status=None, reason=None, dispatch_ref=None):
+    return tasklib.append_event(ev, task_id, log_dir=LOG_DIR, root=AI_DIR,
+                                from_status=from_status, to_status=to_status,
+                                reason=reason, dispatch_ref=dispatch_ref)
+
+
+def validate_events():
+    return tasklib.validate_events(LOG_DIR)
+
+
+def _git_commit():
+    return tasklib._git_commit(AI_DIR)
 
 
 # ---------------- 命令实现 ----------------
@@ -333,6 +177,7 @@ def cmd_new(args):
     print(f"✓ 已创建 {name}.md")
     print(f"  编辑: {path}")
     print(f"  开始: task start {task_id}")
+    append_event("task.created", name, to_status="open")
 
 
 def cmd_list(args):
@@ -363,35 +208,7 @@ def cmd_show(args):
     print(open(path, encoding="utf-8").read())
 
 
-def bump_rework(path, task_id):
-    """in-review → in-progress（打回）时递增 metadata.rework-count；超限拒绝。
-
-    首次开始（open → in-progress）不计数。返回新值；未打回时返回 None。
-    """
-    _, fm = load_task(path)
-    if (fm or {}).get("metadata.status") != "in-review":
-        return None
-    rework = 0
-    raw = (fm.get("metadata.rework-count") or "0").strip()
-    try:
-        rework = int(raw)
-    except ValueError:
-        rework = 0
-    new_rework = rework + 1
-    if new_rework > REWORK_LIMIT:
-        die(f"{task_id}: 返工已达上限（{REWORK_LIMIT} 次，第 {new_rework} 次打回被拒绝）。"
-            f"请人工介入：拆分任务，或记录介入原因后调整 metadata.rework-count 继续。")
-    with open(path, encoding="utf-8") as fh:
-        text = fh.read()
-    if re.search(r"^\s*rework-count:\s*", text, re.M):
-        text = re.sub(r"^(\s*rework-count:\s*).*$", r"\g<1>" + str(new_rework), text, count=1, flags=re.M)
-    else:
-        # 旧任务无该字段：在 depends-on 后插入
-        text = re.sub(r"^(\s*depends-on:.*)$", r"\1\n  rework-count: " + str(new_rework), text, count=1, flags=re.M)
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(text)
-    print(f"✓ 打回计数 rework-count: {rework} → {new_rework}")
-    return new_rework
+# bump_rework 已抽到 tasklib（TASK-021），本模块经模块级包装复用（见文件头部）。
 
 
 def cmd_start(args):
@@ -399,19 +216,12 @@ def cmd_start(args):
     if not path:
         die(f"未找到任务: {args[0]}")
     bump_rework(path, args[0])
-    set_status(path, "in-progress")
+    set_status(path, "in-progress", ev="task.started")
     touch_focus(args[0])
 
 
-def _git_commit():
-    try:
-        proc = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
-                               cwd=AI_DIR, capture_output=True, text=True,
-                               encoding="utf-8", errors="replace")
-        out = proc.stdout.strip()
-        return out if proc.returncode == 0 and out else "n/a"
-    except FileNotFoundError:
-        return "n/a"
+# _git_commit / events_path / _event_last_seq / append_event 已抽到 tasklib（TASK-021），
+# 本模块经文件头部模块级包装复用；事件文件 = <LOG_DIR>/task-events.jsonl。
 
 
 def cmd_verify(args):
@@ -423,6 +233,7 @@ def cmd_verify(args):
         die(f"未找到任务: {args[0]}")
     _, fm = load_task(path)
     task_id = short_id(fm.get("name") if fm else None) or short_id(args[0]) or args[0]
+    cur = (fm or {}).get("metadata.status")
 
     try:
         cfg = cfg_lib.load_config(AI_DIR)
@@ -445,7 +256,14 @@ def cmd_verify(args):
             fail_log = os.path.join(LOG_DIR, f"fail-{today()}.log")
             with open(fail_log, "a", encoding="utf-8") as f:
                 f.write("\n".join(transcript) + "\n\n")
-            die(f"{step} 未通过，详情见 {os.path.relpath(fail_log, AI_DIR)}")
+            tail_log = os.path.join(LOG_DIR, f"fail-{today()}.tail")
+            tail_lines = "\n".join(transcript).splitlines()[-100:]
+            with open(tail_log, "w", encoding="utf-8") as f:
+                f.write("\n".join(tail_lines) + "\n")
+            die(
+                f"{step} 未通过，详情见 {os.path.relpath(fail_log, AI_DIR)}；"
+                f"尾部见 {os.path.relpath(tail_log, AI_DIR)}"
+            )
 
     commit = _git_commit()
     verify_name = f"VERIFY-{today()}-{task_id.lower()}"
@@ -472,6 +290,7 @@ def cmd_verify(args):
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(body)
     print(f"✓ 全部通过，已写 {os.path.relpath(out_path, AI_DIR)}")
+    append_event("task.verified", task_id, from_status=cur, to_status=cur)
 
 
 def cmd_done(args):
@@ -480,7 +299,7 @@ def cmd_done(args):
     path = find_task(args[0])
     if not path:
         die(f"未找到任务: {args[0]}")
-    set_status(path, "done", force=False)
+    set_status(path, "done", force=False, ev="task.done")
     cmd_index([])
     print("提示: 更新 runtime/states/CURRENT_FOCUS.md 切换到下一个任务")
 
@@ -490,7 +309,7 @@ def cmd_block(args):
     if not path:
         die(f"未找到任务: {args[0]}")
     reason = args[1] if len(args) > 1 else "（未填原因）"
-    set_status(path, "blocked")
+    set_status(path, "blocked", ev="task.blocked", reason=reason)
     append_blocker(args[0], reason)
     print("提示: 更新 runtime/states/CURRENT_FOCUS.md")
 
@@ -499,7 +318,7 @@ def cmd_unblock(args):
     path = find_task(args[0])
     if not path:
         die(f"未找到任务: {args[0]}")
-    set_status(path, "in-progress")
+    set_status(path, "in-progress", ev="task.unblocked")
 
 
 def cmd_review(args):
@@ -507,7 +326,7 @@ def cmd_review(args):
     path = find_task(args[0])
     if not path:
         die(f"未找到任务: {args[0]}")
-    set_status(path, "in-review")
+    set_status(path, "in-review", ev="task.review_requested")
     touch_focus(args[0])
     print("提示: 审查通过后 task approve TASK-xxx 关闭；需返工则 task start TASK-xxx（回 in-progress）")
 
@@ -517,7 +336,7 @@ def cmd_approve(args):
     path = find_task(args[0])
     if not path:
         die(f"未找到任务: {args[0]}")
-    set_status(path, "done", require_review=True)
+    set_status(path, "done", require_review=True, ev="task.approved")
     cmd_index([])
     print("提示: 更新 runtime/states/CURRENT_FOCUS.md 切换到下一个任务")
 
@@ -526,7 +345,7 @@ def cmd_cancel(args):
     path = find_task(args[0])
     if not path:
         die(f"未找到任务: {args[0]}")
-    set_status(path, "cancelled")
+    set_status(path, "cancelled", ev="task.cancelled")
 
 
 def touch_focus(task_id):
@@ -566,12 +385,24 @@ def append_blocker(task_id, reason):
 
 # ---------------- 校验 / 索引 ----------------
 
+# validate_events 已抽到 tasklib（TASK-021），本模块经文件头部模块级包装复用。
+
+
 def cmd_validate(args):
+    errors = 0
+    ev_errors, ev_total = validate_events()
+    errors += ev_errors
+    if ev_total:
+        if ev_errors:
+            print(f"✗ 事件文件共 {ev_total} 条，发现 {ev_errors} 个问题")
+        else:
+            print(f"✓ 事件文件共 {ev_total} 条，格式与 seq 校验通过")
     files = task_files()
     if not files:
         print("✓ runtime/tasks/ 为空，无需校验")
-        return
-    errors, seen = 0, set()
+        print("✗ 校验失败，{} 个错误".format(errors) if errors else "✓ 校验完成，0 错误")
+        sys.exit(1 if errors else 0)
+    seen = set()
     for f in files:
         path = os.path.join(TASKS_DIR, f)
         text, fm = load_task(path)

@@ -50,6 +50,3 @@ __pycache__/
 
 # AI agent 运行时状态
 .codewhale/
-
-# AI 运行时激活状态（cli/persona use 生成，每机不同）
-personas/active.md

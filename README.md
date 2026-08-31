@@ -51,20 +51,20 @@ aibase/
 # 1. 克隆本模板并安装到目标项目（交互式终端会问 profile 类型 + 真实命令，
 #    自动生成实例化好的 aios.config.yaml；非交互环境自动退化为纯拷贝模板）
 git clone https://github.com/your-org/aibase.git /tmp/framework
-bash /tmp/framework/kit/cli/mkproject /path/to/your-project --profile backend
+python /tmp/framework/kit/cli/mkproject /path/to/your-project --profile backend
 
 # 2. 锁生成代码目录只读（机械强制，跟具体 AI 工具无关；kit/cli/init 已经跑过一次，
 #    generated_dirs 变化后重跑）
 bash kit/cli/protect
 
 # 3. 创建第一个任务
-bash kit/cli/task new "实现用户登录" --priority P1 --reviewer claude
+python kit/cli/task new "实现用户登录" --priority P1 --reviewer claude
 
 # 4. 按闭环执行（AI agent 遵循 kit/aios/execution/engine.md）
-bash kit/cli/task start TASK-001
-bash kit/cli/task verify TASK-001    # 真跑 build/lint/test/check，不是手写记录
-bash kit/cli/task review TASK-001
-bash kit/cli/task approve TASK-001
+python kit/cli/task start TASK-001
+python kit/cli/task verify TASK-001    # 真跑 build/lint/test/check，不是手写记录
+python kit/cli/task review TASK-001
+python kit/cli/task approve TASK-001
 ```
 
 ## Windows 平台使用说明
@@ -77,7 +77,7 @@ bash kit/cli/task approve TASK-001
 | Python 命令 | `python kit\cli\task ...` | **Windows 用 `python`（不是 `python3`）**；安装 Python 后请确认 `python` 在 PATH |
 | bash 命令 | `bash kit/cli/check` 等 | 需 Git Bash 或 WSL（cmd/PowerShell 不能直接跑 bash 脚本） |
 | `task verify` | `python kit\cli\task verify TASK-001` | 真实执行 `aios.config.yaml` 的 build/lint/test/check |
-| 无人值守 autoloop-* | WSL 下运行 | 依赖 util-linux `flock`，Git Bash/MSYS 不带（会给出明确报错） |
+| 无人值守 autoloop | `python kit\cli\autoloop ...` 直接可用 | Python 实现（TASK-026），无需 WSL/flock；勿用 `bash` 调用（详见脚本头部防护说明） |
 | 沙箱 sandbox-* | 仅 Linux/WSL | 依赖 Docker 容器，Windows 原生不支持 |
 
 其他：脚本/文档已通过 `.gitattributes` 固定行尾（`*.sh`/`*.py`/`*.md` 一律 LF，`*.ps1` 为 CRLF），

@@ -10,7 +10,7 @@ agent.json 形状：
       "server_url": "https://aimonitor.example.com/api/ingest",  # 必填
       "token": "secret",                                          # state=active 时必填
       "projects": [{"id": "proj-1", "path": "/srv/proj-1"}],      # 必填，至少 1 个
-      "poll_interval_seconds": 30,                                # 可选，默认 30
+      "poll_interval_seconds": 10,                                # 可选，默认 10
       "state": "active",                                          # 可选，默认 active
       "req_id": null,                                             # 可选，state=pending 时使用
       "request_key": null                                         # 可选，state=pending 时使用
@@ -23,7 +23,7 @@ agent.json 形状：
 import json
 import os
 
-DEFAULT_POLL_INTERVAL_SECONDS = 30
+DEFAULT_POLL_INTERVAL_SECONDS = 10
 VALID_STATES = frozenset({"unregistered", "pending", "active"})
 
 
@@ -151,6 +151,14 @@ def validate(cfg):
     elif poll <= 0:
         problems.append("poll_interval_seconds 必须大于 0（秒）")
 
+    # 下行指令开关（TASK-036，AGENT-DOWNLINK-CONTRACT）：缺省启用（agent 常驻即拾取）；
+    # 纯遥测部署可显式置 false 关闭执行面
+    downlink = cfg.get("downlink_enabled")
+    if downlink is None:
+        downlink = True
+    if not isinstance(downlink, bool):
+        problems.append("downlink_enabled 必须是布尔值")
+
     if problems:
         raise AgentConfigError("agent.json 配置不合法:\n" + "\n".join(f"  - {p}" for p in problems))
 
@@ -159,6 +167,7 @@ def validate(cfg):
         "token": token_out,
         "projects": projects_out,
         "poll_interval_seconds": poll,
+        "downlink_enabled": downlink,
         "state": state,
         "req_id": req_id_out,
         "request_key": request_key_out,

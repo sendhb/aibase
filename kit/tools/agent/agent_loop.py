@@ -90,11 +90,48 @@ def install_signal_handlers(flag):
     return installed
 
 
+def _incremental_events(events_all, cursor, batch_limit=None):
+    """从事件全量中筛出待推送增量，返回 (task_events, cursor_out)。
+
+    - events_all is None（runtime/logs 缺失或 task-events.jsonl 不存在）→ (None, None)：
+      payload 不携带事件字段（向后兼容）。
+    - cursor is None（从未成功推送）→ 全量；cursor_out = 批量内最大 seq（无事件则 None）。
+    - cursor 已设 → 只推 seq > cursor 的增量；cursor_out = max(cursor, 批量最大 seq)。
+    - 事件文件被截断/重建导致 cursor 大于文件最大 seq → 全量重推（服务端按
+      (project_id, seq) 去重；人为重建导致 seq 与旧流冲突属异常运维，需人工重置
+      .push-cursor，见 agent README TASK-066 已知限制）。
+    - BUG-001（审查返工）：单批截断（默认 agent_payload.MAX_TASK_EVENTS=200）
+      与游标联动——cursor_out 只反映**本轮实际送达**的最大 seq，尾部积压
+      留到下一轮重推，不静默丢事件。
+    """
+    if batch_limit is None:
+        batch_limit = agent_payload.MAX_TASK_EVENTS
+    if events_all is None:
+        return None, None
+    if cursor is None:
+        batch = events_all
+    else:
+        batch = [e for e in events_all if e.get("seq", 0) > cursor]
+        max_all = max((e.get("seq", 0) for e in events_all), default=0)
+        if cursor > max_all:
+            batch = events_all  # 文件被截断/重建：宁可重推，不静默丢事件
+    batch = batch[:batch_limit]
+    if batch:
+        batch_max = max(e.get("seq", 0) for e in batch)
+        cursor_out = batch_max if cursor is None else max(cursor, batch_max)
+    else:
+        cursor_out = cursor
+    return batch, cursor_out
+
+
 def poll_once(cfg, states=None, log=None, clock=time.time,
               read_fn=agent_runtime.read_project_runtime,
               payload_fn=agent_payload.build_payload,
               serialize_fn=agent_payload.serialize_payload,
               push_fn=agent_http.push_payload,
+              task_events_fn=agent_runtime.read_task_events,
+              cursor_read_fn=agent_runtime.read_push_cursor,
+              cursor_write_fn=agent_runtime.write_push_cursor,
               on_auth_rejected=None):
     """执行一轮轮询：遍历 cfg["projects"] 逐项目 读取→构造→序列化→推送。
 
@@ -128,7 +165,10 @@ def poll_once(cfg, states=None, log=None, clock=time.time,
 
         try:
             snapshot = read_fn(project["path"])
-            payload = payload_fn(pid, snapshot)
+            cursor = cursor_read_fn(project["path"])
+            events_all = task_events_fn(project["path"])
+            task_events, cursor_out = _incremental_events(events_all, cursor)
+            payload = payload_fn(pid, snapshot, task_events=task_events, cursor=cursor_out)
             body = serialize_fn(payload)
         except agent_payload.PayloadError as e:
             failed += 1
@@ -152,6 +192,11 @@ def poll_once(cfg, states=None, log=None, clock=time.time,
             continue
 
         state.record_success()
+        if cursor_out is not None:
+            try:
+                cursor_write_fn(project["path"], cursor_out)
+            except (OSError, ValueError) as e:
+                log.error(f"{pid}: 游标写入失败（下次重推，服务端按 seq 去重，幂等可容忍）: {e}")
         pushed += 1
         log.info(f"{pid}: 推送成功")
     return pushed, skipped, failed
@@ -168,8 +213,9 @@ def _positive_seconds(name, value):
 
 
 def run_forever(cfg, interval, states=None, log=None, stop_fn=None,
-                clock=time.time, sleeper=time.sleep, poller=poll_once):
-    """常驻循环：每轮 poll_once 后按 interval 睡眠（分片），stop_fn 置位时干净退出。
+                clock=time.time, sleeper=time.sleep, poller=poll_once,
+                downlink_worker=None):
+    """常驻循环：每轮 poll_once（ingest 心跳）+ downlink tick（TASK-036）后按 interval 睡眠。
 
     参数:
         cfg:      规范化配置（agent_config.validate 输出）
@@ -180,6 +226,9 @@ def run_forever(cfg, interval, states=None, log=None, stop_fn=None,
         clock:    时间来源（单测注入 FakeClock）
         sleeper:  睡眠函数（单测注入手动推进时钟的替身）
         poller:   单轮执行函数（缺省 poll_once；单测注入计数替身）
+        downlink_worker: DownlinkWorker（TASK-036，缺省 None = 不启用下行拾取）；
+                  R2-001：每轮 poller 后 tick()，拾取循环独立于执行线程，
+                  执行中返回 busy 跳过拾取调用，心跳照常不误判 stale
     返回:
         "stopped"（退出原因；供测试/日志断言）
     """
@@ -192,9 +241,12 @@ def run_forever(cfg, interval, states=None, log=None, stop_fn=None,
         log = AgentLog()
 
     log.info(f"常驻启动：{len(cfg['projects'])} 个项目，轮询间隔 {interval:g}s"
-             f"（SIGINT/SIGTERM 干净退出）")
+             f"（SIGINT/SIGTERM 干净退出）"
+             + ("，下行拾取启用" if downlink_worker is not None else ""))
     while not stop_fn():
         poller(cfg, states=states, log=log, clock=clock)
+        if downlink_worker is not None:
+            downlink_worker.tick()
         deadline = clock() + interval
         while not stop_fn():
             remaining = deadline - clock()

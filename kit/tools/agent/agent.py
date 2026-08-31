@@ -31,6 +31,7 @@ if hasattr(sys.stderr, "reconfigure"):
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import agent_config as cfg_lib  # noqa: E402
+import agent_downlink as dl_lib  # noqa: E402
 import agent_loop as loop_lib  # noqa: E402
 import agent_register as reg_lib  # noqa: E402
 
@@ -180,7 +181,8 @@ def main(argv=None):
     if args.check_config:
         print(f"agent: 配置 OK — {cfg['server_url']}，"
               f"{len(cfg['projects'])} 个项目，"
-              f"poll_interval_seconds={cfg['poll_interval_seconds']}")
+              f"poll_interval_seconds={cfg['poll_interval_seconds']}，"
+              f"downlink={'on' if cfg['downlink_enabled'] else 'off'}")
         return 0
 
     # FIND-001 返工：信号处理器在 --register 分支之前安装——注册轮询阶段
@@ -195,16 +197,26 @@ def main(argv=None):
     interval = args.interval if args.interval is not None else cfg["poll_interval_seconds"]
     log = loop_lib.AgentLog(quiet=args.quiet)
 
+    # 下行拾取（TASK-036，AGENT-DOWNLINK-CONTRACT）：downlink_enabled 缺省启用；
+    # 纯遥测部署可 agent.json 置 false 关闭执行面
+    worker = None
+    if cfg["downlink_enabled"]:
+        worker = dl_lib.DownlinkWorker(cfg, log)
+
     if args.once:
         pushed, skipped, failed = loop_lib.poll_once(
             cfg, states={}, log=log, clock=time.time
         )
+        if worker is not None:
+            worker.tick()  # 单轮也拾取一条（手动/cron 场景与常驻行为一致）
+            worker.wait_idle()  # 等执行+回报完成再退出（否则 daemon 线程被进程截杀）
         log.info(f"单轮结束：成功 {pushed}，跳过 {skipped}，失败 {failed}")
         if flag.stopped:
             log.info("收到信号，干净退出")
         return 0
 
-    loop_lib.run_forever(cfg, interval, states={}, log=log, stop_fn=flag)
+    loop_lib.run_forever(cfg, interval, states={}, log=log, stop_fn=flag,
+                         downlink_worker=worker)
     return 0
 
 
