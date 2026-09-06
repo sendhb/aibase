@@ -33,7 +33,10 @@ autoloop_launcher.py — Python 版 autoloop 启动器核心（TASK-025，迁移
 
 纯 stdlib，零外部依赖（与 lib/config.py、lib/tasklib.py、lib/events.py 一致）。
 """
+import collections
+import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -49,6 +52,10 @@ BOTH_LOG = "autoloop-both.log"
 BOTH_PID = "autoloop-both.pid"
 BOTH_LOCK = "autoloop-both.lock"
 STOP_TIMEOUT = 5  # stop 等待进程正常退出秒数，超时强制 kill
+LLM_PID = "autoloop-llm.pid"  # 存活的 LLM 子进程 PID 记录（TASK-099 孤儿收编）
+DEFAULT_TIMEOUT = 1800  # 与 autoloop_coder.DEFAULT_TIMEOUT 一致（LLM 会话超时）
+# LLM 子进程 cmdline 特征（与 llm._provider_argv 生成的一致）
+LLM_PROC_PATTERNS = ("pi -p ", "claude -p ", "codewhale exec --auto")
 
 # Windows 控制台 GBK 无法编码 ▶ 等字符 → 统一 UTF-8 + replace（TASK-002/TASK-011 修复）。
 if hasattr(sys.stdout, "reconfigure"):
@@ -102,11 +109,12 @@ class Parsed(object):
 
 def usage():
     lines = [
-        "用法: autoloop <coder|reviewer|both|stop> [--interval N] [--llm L] [--id ID] [--timeout S] [--unattended]",
+        "用法: autoloop <coder|reviewer|both|stop|status> [--interval N] [--llm L] [--id ID] [--timeout S] [--unattended]",
         "      autoloop both [--once]                             # 默认常驻；--once 只跑单轮",
         "      autoloop both [--coder-llm L1] [--reviewer-llm L2]   # 分角色 LLM（仅 both）",
         "      autoloop both --foreground                       # 前台常驻（配合 tmux 看实时输出）",
         "      autoloop stop                                      # 停止本项目常驻 both 实例",
+        "      autoloop status                                    # 单屏聚合：壳死活/LLM 子进程/in-progress/最近事件",
         "默认: both 无参数 = 常驻并自动后台（日志 runtime/logs/autoloop-both.log）；--once 前台单轮",
         "      coder/reviewer 单模式默认单轮（--once）",
         "注意: autoloop 是 Python 3 脚本（用 python kit/cli/autoloop 调用；Linux 也可 ./kit/cli/autoloop）。",
@@ -328,6 +336,7 @@ def run_resident(root, p, interval, lib_dir=None):
     except KeyboardInterrupt:
         log("── both 常驻停止 ──")
     finally:
+        reap_llm_pid(root, why="daemon 正常退出（SIGINT/SIGTERM/stop）")  # TASK-099 孤儿收编
         lock._release(fd)
         os.close(fd)
     return 0
@@ -449,6 +458,204 @@ def _kill_pid(pid, timeout=STOP_TIMEOUT):
     return not _pid_alive(pid)
 
 
+# ---------------- status（TASK-099 可观测性聚合） ----------------
+
+def llm_pid_path(root):
+    """存活的 LLM 子进程 PID 记录文件（JSON {pid, llm, task, ts}）。"""
+    return os.path.join(root, "runtime", "locks", LLM_PID)
+
+
+def read_llm_pid(root):
+    """读 LLM 子进程 PID 记录；缺失/损坏返回 None。"""
+    try:
+        with open(llm_pid_path(root), encoding="utf-8") as f:
+            return json.loads(f.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def record_llm_pid(root, pid, llm_name, task_id):
+    """记录运行中的 LLM 子进程（TASK-099）。
+
+    写入前检查上一轮残留：进程仍存活则先收编（daemon 存活 = 可捕获路径），
+    避免新旧 LLM 并发改同一任务状态。
+    """
+    old = read_llm_pid(root)
+    if (old and isinstance(old.get("pid"), int) and old["pid"] != pid
+            and _pid_alive(old["pid"])):
+        log("⚠ 检测到上一轮残留 LLM 子进程（PID %d，%s，task %s），收编中..."
+            % (old["pid"], old.get("llm", "?"), old.get("task", "-")))
+        reap_llm_pid(root, why="下一轮 spawn 前残留收编")
+    try:
+        with open(llm_pid_path(root), "w", encoding="utf-8") as f:
+            f.write(json.dumps({"pid": pid, "llm": llm_name,
+                                "task": task_id, "ts": int(time.time())},
+                               ensure_ascii=False))
+    except OSError as e:
+        log("⚠ LLM PID 记录写入失败（不阻断 LLM 调用）: %s" % e, err=True)
+
+
+def clear_llm_pid(root, pid=None):
+    """清除 PID 记录；传 pid 时仅当记录匹配才清（防误删新一轮记录）。"""
+    if pid is not None:
+        rec = read_llm_pid(root)
+        if rec and rec.get("pid") != pid:
+            return
+    try:
+        os.remove(llm_pid_path(root))
+    except OSError:
+        pass
+
+
+def reap_llm_pid(root, why="daemon stop"):
+    """收编记录中的 LLM 子进程：SIGTERM → 等待 → SIGKILL（复用 _kill_pid）。
+
+    只覆盖可捕获退出路径（stop/SIGTERM/下一轮 spawn 前）；kill -9 残留
+    无 handler 可跑，由 status 命令暴露给人工决策（TASK-099 决策）。
+    返回是否实际收编了存活进程。
+    """
+    rec = read_llm_pid(root)
+    if not rec:
+        return False
+    pid = rec.get("pid")
+    clear_llm_pid(root)
+    if not isinstance(pid, int) or pid <= 0 or not _pid_alive(pid):
+        return False
+    log("── 收编 LLM 子进程（PID %d，%s，task %s）: %s ──"
+        % (pid, rec.get("llm", "?"), rec.get("task", "-"), why))
+    if not _kill_pid(pid):
+        log("⚠ 进程 %d 未能正常退出，已强制 kill" % pid, err=True)
+    return True
+
+
+def _heartbeat_age(path, now):
+    """心跳文件 mtime 距今秒数；文件缺失返回 None。"""
+    try:
+        return now - os.path.getmtime(path)
+    except OSError:
+        return None
+
+
+def _tail_lines(path, n):
+    """读文件末尾 n 行（列表，保序）；文件缺失返回 []。"""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return list(collections.deque(f, maxlen=n))
+    except OSError:
+        return []
+
+
+def _scan_llm_processes():
+    """ps 扫描 LLM 子进程（POSIX）。返回 [(pid, cmdline)]；不可用（Windows/无 ps）返回 None。"""
+    if os.name == "nt":
+        return None
+    try:
+        r = subprocess.run(["ps", "-eo", "pid,args"], capture_output=True,
+                           text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    found = []
+    for line in r.stdout.splitlines()[1:]:
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2:
+            continue
+        pid_s, cmd = parts
+        if "autoloop" in cmd or cmd.startswith("ps "):
+            continue
+        if any(pat in cmd for pat in LLM_PROC_PATTERNS):
+            try:
+                found.append((int(pid_s), cmd))
+            except ValueError:
+                pass
+    return found
+
+
+def _fmt_hb(name, log_dir, now, hb_max):
+    """单角色心跳行：age 与阈值对比 → 新鲜 / 停滞 / 无心跳。"""
+    age = _heartbeat_age(os.path.join(log_dir, "autoloop-%s.heartbeat" % name), now)
+    if age is None:
+        return "  %-9s: 无心跳（从未运行或已清理）" % name
+    tag = "新鲜" if age <= hb_max else "停滞（超 %ds 未跳动，可能卡在长 LLM 会话或壳已僵死）" % hb_max
+    return "  %-9s: 心跳 %d 秒前 — %s" % (name, int(age), tag)
+
+
+def cmd_status(root, p):
+    """单屏聚合四要素：① 壳死活 ② LLM 子进程 ③ in-progress 任务 ④ 最近事件。"""
+    log_dir = os.path.join(root, "runtime", "logs")
+    tasks_dir = os.path.join(root, "runtime", "tasks")
+    interval = both_interval(p)
+    timeout = p.timeout if p.timeout is not None else DEFAULT_TIMEOUT
+    hb_max = interval + timeout  # 心跳年龄阈值：一轮最长 = 轮询间隔 + LLM 超时
+    now = time.time()
+    log("═══ autoloop status（间隔 %ds，LLM 超时 %ds）═══" % (interval, timeout))
+
+    # ① 循环壳死活：PID 文件 + 进程存活（准）+ heartbeat 年龄（参考）
+    pidfile = os.path.join(root, "runtime", "locks", BOTH_PID)
+    pid = 0
+    try:
+        with open(pidfile, encoding="ascii") as f:
+            pid = int(f.read().strip() or "0")
+    except (OSError, ValueError):
+        pass
+    if pid > 0 and _pid_alive(pid):
+        log("① 壳 both: 运行中（PID %d）" % pid)
+    elif pid > 0:
+        log("① 壳 both: 已停止（PID 文件残留 %d，进程已死）" % pid)
+    else:
+        log("① 壳 both: 已停止（无 PID 文件）")
+    for name in ("coder", "reviewer"):
+        log(_fmt_hb(name, log_dir, now, hb_max))
+
+    # ② LLM 子进程：PID 记录（本轮在跑）+ ps 扫描（孤儿暴露，人工决策兑底）
+    rec = read_llm_pid(root)
+    scanned = _scan_llm_processes()
+    log("② LLM 子进程:")
+    recorded_pid = None
+    if rec:
+        recorded_pid = rec.get("pid")
+        alive = _pid_alive(recorded_pid) if isinstance(recorded_pid, int) else False
+        state = "存活" if alive else "已死（PID 记录残留）"
+        log("  记录: %s (PID %s，task %s) — %s"
+            % (rec.get("llm", "?"), recorded_pid, rec.get("task", "-"), state))
+    else:
+        log("  记录: 无（无 LLM 子进程在跑）")
+    if scanned is None:
+        log("  扫描: 此平台无 ps，跳过（孤儿检测不可用）")
+    elif scanned:
+        for spid, cmd in scanned:
+            mark = "记录在案" if spid == recorded_pid else "⚠ 孤儿（无 PID 记录，人工决策）"
+            log("  扫描: PID %d — %s【%s】" % (spid, cmd[:100], mark))
+    else:
+        log("  扫描: 无 pi/claude/codewhale 进程")
+
+    # ③ in-progress 任务清单
+    inprog = []
+    try:
+        rx = re.compile(r"^\s*status:\s*in-progress\s*$", re.M)
+        for fn in sorted(os.listdir(tasks_dir)):
+            if not fn.endswith(".md"):
+                continue
+            path = os.path.join(tasks_dir, fn)
+            try:
+                with open(path, encoding="utf-8") as f:
+                    if rx.search(f.read(4096)):
+                        inprog.append(fn[:-3])
+            except OSError:
+                pass
+    except OSError:
+        pass
+    log("③ in-progress 任务: %s" % (", ".join(inprog) if inprog else "无"))
+
+    # ④ 最近事件：task-events.jsonl 尾 5 + autoloop 角色事件尾 2
+    log("④ 最近事件:")
+    for ln in _tail_lines(os.path.join(log_dir, "task-events.jsonl"), 5):
+        log("  task : %s" % ln.rstrip())
+    for name in ("coder", "reviewer"):
+        for ln in _tail_lines(os.path.join(log_dir, "autoloop-%s-events.jsonl" % name), 2):
+            log("  %-6s: %s" % (name, ln.rstrip()))
+    return 0
+
+
 def cmd_stop(root):
     """停止本项目常驻 both 实例（PID 文件 + 锁双确认，与旧 Bash stop 一致）。"""
     lock_dir = os.path.join(root, "runtime", "locks")
@@ -519,6 +726,8 @@ def main(argv=None):
     mode = p.mode
     if mode == "stop":
         return cmd_stop(root)
+    if mode == "status":
+        return cmd_status(root, p)
     if mode in ("coder", "reviewer"):
         if p.coder_llm or p.reviewer_llm:
             log("✗ --coder-llm/--reviewer-llm 仅用于 both 模式", err=True)
@@ -529,7 +738,7 @@ def main(argv=None):
         return cmd_single(root, mode, p)
     if mode == "both":
         return cmd_both(root, p, launcher_script=os.path.abspath(sys.argv[0]))
-    log("✗ 未知模式: %s（支持 coder | reviewer | both | stop）" % mode, err=True)
+    log("✗ 未知模式: %s（支持 coder | reviewer | both | stop | status）" % mode, err=True)
     return 1
 
 

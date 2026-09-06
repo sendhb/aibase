@@ -1,4 +1,4 @@
-"""agent_loop.py — 主循环与常驻（kit/tools/agent/ 循环层）。
+"""agent_loop.py — 主循环与常驻（kit/tools/telemetry/ 循环层）。
 
 汇聚 TASK-022 配置 / TASK-023 runtime 读取 / TASK-024 payload 构造 /
 TASK-025 HTTP 推送 / TASK-026 重试退避，组成常驻轮询主循环：
@@ -16,6 +16,7 @@ TASK-025 HTTP 推送 / TASK-026 重试退避，组成常驻轮询主循环：
   分片保证信号响应延迟上限 ≈ 0.5s + 在途 read_timeout（≤30s），随后干净退出。
 - 可测试：时钟/睡眠/读取/构造/序列化/推送函数全部可注入，单测零真实网络与 sleep。
 """
+import json
 import math
 import signal
 import sys
@@ -124,6 +125,81 @@ def _incremental_events(events_all, cursor, batch_limit=None):
     return batch, cursor_out
 
 
+def _session_line_cost(text):
+    """session 行在 payload 中的精确字节成本（JSON 转义后 + 分隔符）。
+
+    按 JSON 转义后的字节数计（引号/反斜杠翻倍、非 ASCII 原样 UTF-8），
+    防止按原文长度低估导致整体超限 PayloadTooLargeError。"""
+    return len(json.dumps(text, ensure_ascii=False).encode("utf-8")) + 1
+
+
+def _truncate_session_line(text, max_line_bytes):
+    """单行超长截断：按字节切 + TRUNCATION_SUFFIX（与快照 content 截断同标记）。
+
+    截断后行尾标记可被服务端/查看页识别；完整原文仍在本地 session jsonl
+    （TASK-103 本地回放是真相源），游标照常推过原行，不重推。"""
+    suffix = agent_payload.TRUNCATION_SUFFIX
+    budget = max_line_bytes - len(suffix.encode("utf-8"))
+    if budget <= 0:
+        return suffix
+    return text.encode("utf-8", "replace")[:budget].decode("utf-8", "ignore") + suffix
+
+
+def _incremental_sessions(session_deltas, cursor_offsets,
+                          max_bytes=None, max_line_bytes=None):
+    """session 增量按体积预算截批，返回 (sessions_part, cursor_out)。
+
+    - session_deltas is None（sessions 目录缺失/无 jsonl）→ (None, None)：
+      payload 不含 sessions 键（向后兼容）。
+    - 空列表（已启用但无新增）→ 空确认：items=[]、truncated=False、
+      cursor=旧游标（与服务端确认已追平，类比事件流空批）。
+    - 有新增：按 key 确定性排序逐行装入预算；装不下的行截批（truncated=True）
+      留待下轮，该文件剩余行游标不动（重推），**后续文件不受堵**继续装入；
+      cursor_out 只反映**本轮实际装入**的行末偏移（outbox 不虚报，
+      BUG-001 同款教训：截批时游标不越过未送达行）。
+    - 单行 > max_line_bytes → 行内截断后照常计入：任何行 ≤ 上限 < 新一轮
+      满预算，积压逐轮推进，无永久堵批。
+    """
+    if max_bytes is None:
+        max_bytes = agent_payload.MAX_SESSION_BYTES
+    if max_line_bytes is None:
+        max_line_bytes = agent_payload.MAX_SESSION_LINE_BYTES
+    if session_deltas is None:
+        return None, None
+    old = cursor_offsets if isinstance(cursor_offsets, dict) else {}
+    if not session_deltas:
+        part = {"items": [], "truncated": False, "cursor": dict(old)}
+        return part, dict(old)
+    sent = dict(old)
+    budget = max_bytes
+    truncated = False
+    groups = {}
+    for delta in sorted(session_deltas, key=lambda d: d.get("key", "")):
+        rows = []
+        for row in delta.get("lines") or []:
+            text = row.get("text", "")
+            end = row.get("end", 0)
+            cost = _session_line_cost(text)
+            if cost > max_line_bytes:
+                text = _truncate_session_line(text, max_line_bytes)
+                cost = _session_line_cost(text)
+            if cost > budget:
+                # 该文件剩余行留给下轮（游标不动 → 重推）；继续尝试后续文件，
+                # 不让单个大文件堵住其它文件的推进。
+                truncated = True
+                break
+            budget -= cost
+            rows.append(text)
+            sent[delta.get("key", "")] = end
+        if rows:
+            # 先入组再判截批：已装入行必须随本批送达，游标才能推进（outbox 不变量）
+            groups.setdefault(delta.get("task_id", ""), []).append(
+                {"name": delta.get("name", ""), "lines": rows})
+    items = [{"task_id": tid, "files": groups[tid]} for tid in sorted(groups)]
+    part = {"items": items, "truncated": truncated, "cursor": sent}
+    return part, sent
+
+
 def poll_once(cfg, states=None, log=None, clock=time.time,
               read_fn=agent_runtime.read_project_runtime,
               payload_fn=agent_payload.build_payload,
@@ -132,7 +208,10 @@ def poll_once(cfg, states=None, log=None, clock=time.time,
               task_events_fn=agent_runtime.read_task_events,
               cursor_read_fn=agent_runtime.read_push_cursor,
               cursor_write_fn=agent_runtime.write_push_cursor,
-              on_auth_rejected=None):
+              on_auth_rejected=None,
+              session_read_fn=agent_runtime.read_session_deltas,
+              session_cursor_read_fn=agent_runtime.read_session_push_cursor,
+              session_cursor_write_fn=agent_runtime.write_session_push_cursor):
     """执行一轮轮询：遍历 cfg["projects"] 逐项目 读取→构造→序列化→推送。
 
     参数:
@@ -143,6 +222,8 @@ def poll_once(cfg, states=None, log=None, clock=time.time,
         其余 *fn: 读取/构造/序列化/推送函数，单测注入替身（默认接真实模块）
         on_auth_rejected: 可选回调 on_auth_rejected(pid, error)——推送收到 HTTP 401
             （token 失效/被吊销）时调用；由注册流程注入，用于重新轮询注册状态（INT-003）
+        session_read_fn / session_cursor_read_fn / session_cursor_write_fn:
+            TASK-104 session 日志流读取/游标函数（默认接真实模块，单测注入替身）
     返回:
         (pushed, skipped, failed)：成功推送 / 退避跳过 / 失败的项目数
     """
@@ -168,8 +249,45 @@ def poll_once(cfg, states=None, log=None, clock=time.time,
             cursor = cursor_read_fn(project["path"])
             events_all = task_events_fn(project["path"])
             task_events, cursor_out = _incremental_events(events_all, cursor)
-            payload = payload_fn(pid, snapshot, task_events=task_events, cursor=cursor_out)
-            body = serialize_fn(payload)
+            # TASK-104 session 日志流：目录缺失/无 jsonl → deltas None → payload
+            # 不含 sessions 键（向后兼容）；有 backlog 时先测快照+事件占用的字节数，
+            # 剩余预算给 session 增量（≤ MAX_SESSION_BYTES）——backlog 再大也不把
+            # 整体推过 MAX_PAYLOAD_BYTES，心跳不饿死；预算不足本轮只发快照/事件。
+            session_cursor = session_cursor_read_fn(project["path"])
+            deltas_result = session_read_fn(project["path"], session_cursor)
+            sessions_part = None
+            session_cursor_out = None
+            if deltas_result is not None:
+                session_deltas = deltas_result[0]
+                if session_deltas:
+                    rest_payload = payload_fn(pid, snapshot, task_events=task_events,
+                                              cursor=cursor_out)
+                    rest_bytes = len(serialize_fn(rest_payload).encode("utf-8"))
+                    budget = agent_payload.MAX_PAYLOAD_BYTES - rest_bytes \
+                        - agent_payload.SESSION_ACCOUNT_MARGIN
+                    budget = min(max(budget, 0), agent_payload.MAX_SESSION_BYTES)
+                    if budget >= agent_payload.MIN_SESSION_BUDGET:
+                        sessions_part, session_cursor_out = _incremental_sessions(
+                            session_deltas, session_cursor, max_bytes=budget)
+                    # 预算不足 → sessions_part 保持 None：本轮只发快照/事件（session 下轮再推）
+                else:
+                    # 已启用但无新增 → 空确认（items=[] + cursor 不变）
+                    sessions_part, session_cursor_out = _incremental_sessions(
+                        session_deltas, session_cursor)
+            payload = payload_fn(pid, snapshot, task_events=task_events,
+                                 cursor=cursor_out, sessions=sessions_part)
+            try:
+                body = serialize_fn(payload)
+            except agent_payload.PayloadTooLargeError:
+                # 兑底：预算估算偏差（如游标映射超预期膨胀）导致整体超限时，
+                # 退回纯快照/事件推送保心跳，session 留待下轮（游标未写不丢数据）。
+                if sessions_part is None:
+                    raise
+                sessions_part = None
+                session_cursor_out = None
+                payload = payload_fn(pid, snapshot, task_events=task_events,
+                                     cursor=cursor_out)
+                body = serialize_fn(payload)
         except agent_payload.PayloadError as e:
             failed += 1
             state.record_failure()
@@ -197,6 +315,11 @@ def poll_once(cfg, states=None, log=None, clock=time.time,
                 cursor_write_fn(project["path"], cursor_out)
             except (OSError, ValueError) as e:
                 log.error(f"{pid}: 游标写入失败（下次重推，服务端按 seq 去重，幂等可容忍）: {e}")
+        if session_cursor_out is not None:
+            try:
+                session_cursor_write_fn(project["path"], session_cursor_out)
+            except (OSError, ValueError) as e:
+                log.error(f"{pid}: session 游标写入失败（下次重推该批 session 增量）: {e}")
         pushed += 1
         log.info(f"{pid}: 推送成功")
     return pushed, skipped, failed

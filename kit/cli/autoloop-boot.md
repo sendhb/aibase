@@ -60,7 +60,7 @@ open → in-progress → in-review → done
 1. 读 boot + TASK + 相关模块，制定计划
 2. 实现（只改 source_dirs）
 3. `./kit/cli/task verify TASK-xxx`（真实执行，不手写 VERIFY）
-4. 通过后：fast-path → `task done`；完整路径 → `task review`
+4. 通过后：fast-path → `task done`；完整路径 → `task review`（转 review 前先在 front-matter 指定 reviewer，否则 `task review` 会 die——TASK-101 硬拦截）
 5. 完整路径任务**不自行 approve/done**（生成者 ≠ 审查者）
 6. 需动 P0 文件 → `task block` 等人工，不继续实现
 

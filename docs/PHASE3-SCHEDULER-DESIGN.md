@@ -11,7 +11,7 @@
 | 项目注册表 | `aimonitor/config/projects.json`：10 条注册——6 条同机本地项目（`/home/hb/code/*`，默认 transport）+ 4 条远端 `D:/share/*`（`"transport": "agent"`） | TASK-054 定为权威注册表 |
 | 单项目任务状态机 | `kit/cli/task`：TASK-*.md frontmatter，open→in-progress→in-review→done | TASK-001.. |
 | 单项目自动执行 | `kit/cli/autoloop-coder`：单项目内捡 open/in-progress 任务，锁防并发 | TASK-012..021 |
-| 上行遥测 | `kit/tools/agent/`：读 runtime/ → 推 aimonitor（心跳/事件流/游标） | TASK-022..029, 042..044, 065..066 |
+| 上行遥测 | `kit/tools/telemetry/`：读 runtime/ → 推 aimonitor（心跳/事件流/游标） | TASK-022..029, 042..044, 065..066 |
 | 审查闭环 | `autoloop-reviewer`：独立进程，只经 runtime/ 文件耦合（生成者≠审查者） | TASK-014..017 |
 | 跨机部署 | `docs/DEPLOY-DUAL-PLATFORM.md`：Windows/Linux 双平台 | TASK-035, 052 |
 
@@ -139,5 +139,5 @@
 
 - `docs/ROADMAP.md` — Phase 3 行
 - `kit/knowledge/glossary/harness-patterns.md` — Ralph 跨项目扩展原则
-- `kit/tools/agent/` — 上行遥测（下行复用其事件流约定）
+- `kit/tools/telemetry/` — 上行遥测（下行复用其事件流约定）
 - `docs/PPT-AIBASE-INTRO-OUTLINE.md` 第 18 页 — 四阶段演进表

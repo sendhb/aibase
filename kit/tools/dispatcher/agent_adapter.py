@@ -22,6 +22,7 @@ import shlex
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from downlink import CommandResult, DownlinkError  # noqa: E402,F401
@@ -38,6 +39,22 @@ AGENT_NAMES = ("task_start", "autoloop_coder", "autoloop_reviewer")
 POLL_INTERVAL_DEFAULT = 5.0   # 指令状态轮询间隔（秒；远小于 agent poll_interval）
 ACK_MARGIN = 90.0             # 拾取余量（秒；覆盖 agent 轮询周期 + 网络抖动）
 ACK_MARGIN_ENV = "AIOS_DOWNLINK_ACK_MARGIN"  # 可环境变量覆盖（集成验证/烟幕用短值）
+
+INGEST_PATH_SUFFIX = "/api/ingest"  # agent.json / 注册表 server_url 的文档契约形态
+
+
+def aimonitor_base_url(server_url):
+    """ingest 完整地址 → 裸 origin base（TASK-083，与 agent.derive_downlink_base_url 同义）。
+
+    注册表 aimonitor.server_url 若按 agent.json 文档形态配置（含 /api/ingest 后缀），
+    而下行端点（/api/downlink/*、/api/status）自 origin 起根——直拼 404（生产复现：
+    agent 侧 2026-09-01）。剥后缀归一；裸 origin 原样放行。纯前缀剥离，无副作用。
+    """
+    parts = urllib.parse.urlsplit(str(server_url).strip())
+    path = parts.path.rstrip("/")
+    if path.endswith(INGEST_PATH_SUFFIX):
+        path = path[: -len(INGEST_PATH_SUFFIX)]
+    return urllib.parse.urlunsplit((parts.scheme, parts.netloc, path, "", ""))
 
 
 class LocalAdapter:
@@ -67,7 +84,7 @@ class AgentAdapter:
         if not token or not str(token).strip():
             raise DownlinkError(
                 "agent 通道缺 token（环境变量 AIOS_DOWNLINK_TOKEN；token 不入注册表/日志）")
-        self.server_url = str(server_url).strip().rstrip("/")
+        self.server_url = aimonitor_base_url(str(server_url).strip())
         self.token = str(token)
         self.poll_interval = poll_interval
         self.ack_margin = float(ack_margin)

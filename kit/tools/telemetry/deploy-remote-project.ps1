@@ -6,7 +6,7 @@
 #
 # 用法（hb 在 Windows 项目机执行）：
 #   1) 从 aibase 机拷入三个文件（任选目录，如 $env:TEMP\aios-deploy）：
-#      - aibase 的 kit 目录（含 tools/agent/）
+#      - aibase 的 kit 目录（含 tools/telemetry/）
 #      - aimonitor/config/projects.json
 #      - aimonitor/config/agents.json（token 源，⚠ 勿提交 Git）
 #   2) powershell -ExecutionPolicy Bypass -File .\deploy-remote-project.ps1 `
@@ -33,7 +33,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 # --- 0. 前置检查 ---------------------------------------------------------------
-$agentPy = Join-Path $KitDir "tools\agent\agent.py"
+$agentPy = Join-Path $KitDir "tools\telemetry\agent.py"
 if (-not (Test-Path $agentPy)) { throw "找不到 agent.py: $agentPy（-KitDir 应指向 aibase 的 kit 目录）" }
 if (-not (Test-Path $ProjectsJson)) { throw "找不到 -ProjectsJson: $ProjectsJson" }
 if (-not (Test-Path $AgentsJson)) { throw "找不到 -AgentsJson: $AgentsJson" }

@@ -330,6 +330,14 @@ def set_status(path, new_status, verify_dir, review_dir, log_dir, root=None,
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(out))
     print(f"✓ {os.path.basename(path)} → {new_status}")
+    if new_status == "done":
+        # 评估自动采集（TASK-093）：done/approve 两条关闭路径都汇于此，单源落盘。
+        # 采集是旁路：任何异常只 stderr 告警，绝不阻塞 done 主流程。
+        try:
+            collect_done_metrics(root if root is not None else find_project_root(path),
+                                 path, fm)
+        except Exception as e:  # noqa: BLE001 —— 旁路采集不得影响状态机
+            print(f"⚠ 评估采集异常（主流程不受影响）: {e}", file=sys.stderr)
     if ev:
         append_event(ev, os.path.basename(path), log_dir=log_dir, root=root,
                      from_status=cur, to_status=new_status, reason=reason)
@@ -364,6 +372,81 @@ def bump_rework(path, task_id):
         f.write(text)
     print(f"✓ 打回计数 rework-count: {rework} → {new_rework}")
     return new_rework
+
+
+# ---------------- 评估自动采集（TASK-093） ----------------
+# 挂 tasklib 而非 autoloop：tasklib 是 CLI/autoloop 共享单源，done 与 verify 失败
+# 是状态机/校验路径上的天然采集点，人用（CLI）与机用（autoloop）两条路径全覆盖。
+
+
+def evaluation_dir(root):
+    """评估数据目录：kit 布局（<root>/kit/ 存在）→ <root>/kit/evaluation；平铺布局 → <root>/evaluation。"""
+    if os.path.isdir(os.path.join(root, "kit")):
+        return os.path.join(root, "kit", "evaluation")
+    return os.path.join(root, "evaluation")
+
+
+def _append_jsonl(path, record):
+    """追加一行 JSON。OSError 只 stderr 告警并返回 False（采集是旁路，不阻塞主流程）。"""
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+        return True
+    except OSError as e:
+        print(f"⚠ 评估采集写盘失败（主流程不受影响）: {e}", file=sys.stderr)
+        return False
+
+
+def collect_done_metrics(root, path, fm):
+    """任务 closed（→ done）时追加一条到 evaluation/metrics/task-metrics.jsonl。
+
+    字段：task/risk/priority/rework-count/created/updated/duration_days/done_at。
+    字段解析失败一律降级为空/0，不抛异常。字段位置用 fm_get 双向兼容
+    （created/updated 顶层或 metadata 下均可达）。
+    """
+    def _s(key):
+        val = fm_get(fm, key)
+        return str(val).strip() if val is not None else ""
+
+    try:
+        rework = int(_s("metadata.rework-count") or 0)
+    except ValueError:
+        rework = 0
+    created, updated = _s("created"), _s("updated")
+    duration_days = ""
+    try:
+        duration_days = max(0, (datetime.date.fromisoformat(updated)
+                                - datetime.date.fromisoformat(created)).days)
+    except ValueError:
+        pass
+    record = {
+        "task": str(fm.get("name") or os.path.basename(path)).strip(),
+        "risk": _s("metadata.risk"),
+        "priority": _s("metadata.priority"),
+        "rework-count": rework,
+        "created": created,
+        "updated": updated,
+        "duration_days": duration_days,
+        "done_at": today(),
+    }
+    return _append_jsonl(os.path.join(evaluation_dir(root), "metrics", "task-metrics.jsonl"),
+                         record)
+
+
+def collect_verify_failure(root, task_id, failed_command, fail_log_rel):
+    """verify 失败时追加一条到 evaluation/failures/failures.jsonl。
+
+    字段：task/date/failed_command/fail_log（相对项目根，指向 runtime/logs/fail-<date>.log）。
+    """
+    record = {
+        "task": task_id,
+        "date": today(),
+        "failed_command": failed_command,
+        "fail_log": fail_log_rel,
+    }
+    return _append_jsonl(os.path.join(evaluation_dir(root), "failures", "failures.jsonl"),
+                         record)
 
 
 # ---------------- 事件（task-events.jsonl outbox） ----------------

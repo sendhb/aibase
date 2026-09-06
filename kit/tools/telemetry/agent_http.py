@@ -1,4 +1,4 @@
-"""agent_http.py — AIOS 遥测 HTTP 推送客户端（kit/tools/agent/ 推送层）。
+"""agent_http.py — AIOS 遥测 HTTP 推送客户端（kit/tools/telemetry/ 推送层）。
 
 消费 TASK-024 `serialize_payload()` 输出的 JSON 字符串，POST 到监控端 ingest
 （默认路径 /api/ingest，完整地址来自 agent.json `server_url`）：

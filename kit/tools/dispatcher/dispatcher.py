@@ -76,7 +76,7 @@ import state as state_lib  # noqa: E402
 
 # agent_config 用于 monitor 的推送配置加载（agent.json 形状）；
 # agent_runtime 用于 monitor 的本地项目快照读取（governance blocked 派生）
-AGENT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "agent")
+AGENT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "telemetry")
 if AGENT_DIR not in sys.path:
     sys.path.insert(0, AGENT_DIR)
 import agent_config as agent_config_lib  # noqa: E402

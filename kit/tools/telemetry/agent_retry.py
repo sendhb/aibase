@@ -1,4 +1,4 @@
-"""agent_retry.py — AIOS 遥测推送重试退避状态机（kit/tools/agent/ 退避层）。
+"""agent_retry.py — AIOS 遥测推送重试退避状态机（kit/tools/telemetry/ 退避层）。
 
 消费 TASK-025 `agent_http.push_payload()` 抛出的推送失败，提供"指数退避 +
 连续失败计数 + 恢复重置"的时间状态机，供 TASK-027 主循环使用：

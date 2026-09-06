@@ -27,20 +27,25 @@ USAGE = """task — 任务追踪 CLI（AIOS + Reliable AI Engineering Framework�
   task review TASK-001
   task approve TASK-001
   task done TASK-001 [--force]
-  task block TASK-001 "原因"
+  task block TASK-001 "原因"   # 原因必填，缺失则非零退出
   task unblock TASK-001
   task cancel TASK-001
   task validate
   task index
   task stats
+  task metrics [--days N]   # 评估汇总：done 率 / 平均 rework-count / token 估算合计
   task help
 """
 import os
 import re
 import sys
+import contextlib
 import datetime
+import json
 import shutil
 import subprocess
+import threading
+import time
 
 # Windows 控制台 GBK 下 print(✓/✗/中文) 会 UnicodeEncodeError（TASK-002）；
 # 子进程输出统一按 UTF-8 解码（errors=replace 防个别非法字节打断读取线程）。
@@ -51,6 +56,7 @@ if hasattr(sys.stderr, "reconfigure"):
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 import config as cfg_lib  # noqa: E402
+import lock as lock_lib  # noqa: E402  跨平台文件锁原语（TASK-012；TASK-099 复用）
 import tasklib  # noqa: E402  （任务读写/状态机/治理判断，TASK-021）
 
 
@@ -114,10 +120,56 @@ def events_path():
     return tasklib.events_path(LOG_DIR)
 
 
+# ---- 跨进程事件锁（TASK-099）：并发 task new 的 seq/编号竞争修复 ----
+# 实录：2026-09-04 并行两条 task new 各写 task-events.jsonl seq=174；
+# 任务编号同理可能撞号。锁把「读序号 → 写文件」变成临界区。
+EVENTS_LOCK = os.path.join(RUNTIME_DIR, "locks", "task-events.lock")
+_events_lock_held = False  # 进程内重入标记（CLI 主线程串行；跨进程/跨线程由 flock 互斥）
+
+
+@contextlib.contextmanager
+def _events_lock(timeout=10.0):
+    """task-events.jsonl 追加 / 任务编号分配 的跨进程互斥（TASK-099）。
+
+    复用 lock.py 的跨平台原语（POSIX: fcntl.flock；Windows: msvcrt.locking）。
+    阻塞轮询至多 timeout 秒；超时降级放行并告警 —— 与事件追加「失败只告警
+    不阻断」语义一致：宁可低概率偶发竞争，不卡死任务操作。
+    同进程重入直接放行（外层已持锁；flock 对同线程新开 fd 仍互斥，会假死锁）。
+    """
+    global _events_lock_held
+    if _events_lock_held:
+        yield
+        return
+    os.makedirs(os.path.dirname(EVENTS_LOCK), exist_ok=True)
+    fd = lock_lib._open_lock(EVENTS_LOCK)
+    acquired = False
+    deadline = time.time() + timeout
+    try:
+        while True:
+            if lock_lib._acquire(fd):
+                acquired = True
+                break
+            if time.time() >= deadline:
+                print("⚠ 事件锁等待超时（%.0fs），降级放行（可能偶发 seq 竞争）" % timeout,
+                      file=sys.stderr)
+                break
+            time.sleep(0.05)
+        _events_lock_held = True
+        try:
+            yield
+        finally:
+            _events_lock_held = False
+    finally:
+        if acquired:
+            lock_lib._release(fd)
+        os.close(fd)
+
+
 def append_event(ev, task_id, from_status=None, to_status=None, reason=None, dispatch_ref=None):
-    return tasklib.append_event(ev, task_id, log_dir=LOG_DIR, root=AI_DIR,
-                                from_status=from_status, to_status=to_status,
-                                reason=reason, dispatch_ref=dispatch_ref)
+    with _events_lock():  # TASK-099：seq 读取→追加全程持锁，保证 seq 单调
+        return tasklib.append_event(ev, task_id, log_dir=LOG_DIR, root=AI_DIR,
+                                    from_status=from_status, to_status=to_status,
+                                    reason=reason, dispatch_ref=dispatch_ref)
 
 
 def validate_events():
@@ -147,33 +199,39 @@ def cmd_new(args):
         slug = re.sub(r"[^a-z0-9]+", "-", desc.lower()).strip("-")
         if not slug:
             slug = "task"
-    nums = [int(TASK_RE.match(f).group(1)) for f in task_files() if TASK_RE.match(f)]
-    num = (max(nums) + 1) if nums else 1
-    task_id = f"TASK-{num:03d}"
-    name = f"{task_id}-{slug}"
-    path = os.path.join(TASKS_DIR, name + ".md")
-    if os.path.exists(path):
-        die(f"已存在: {path}")
-    template = open(TEMPLATE, encoding="utf-8").read() if os.path.exists(TEMPLATE) else ""
-    if not template:
-        die("模板缺失: runtime/tasks/TASK.template.md")
-    now = today()
-    body = (template
-            .replace("TASK-000-<slug>", name)
-            .replace("一句话说明任务目标", desc)
-            .replace("  status: open", f"  status: open")
-            .replace("  created: YYYY-MM-DD", f"  created: {now}")
-            .replace("  updated: YYYY-MM-DD", f"  updated: {now}")
-            .replace("  priority: P2", f"  priority: {opts.get('--priority', 'P2')}")
-            .replace("  risk: P2", f"  risk: {opts.get('--risk', 'P2')}")
-            .replace("  approval-ref: none", f"  approval-ref: {opts.get('--approval-ref', 'none')}")
-            .replace("  assignee: any", f"  assignee: {opts.get('--assignee', 'any')}")
-            .replace("  reviewer: any", f"  reviewer: {opts.get('--reviewer', 'any')}"))
-    if opts.get("--parent"):
-        body = body.replace("  parent: TASK-000", f"  parent: {opts['--parent']}")
-    body = body.replace("TASK-000 — 任务标题", f"{task_id} — {desc}")
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(body)
+    # TASK-099：编号分配→写任务文件→事件追加全程持跨进程锁，
+    # 消除并发 task new 的撞号/重 seq（2026-09-04 双 174 实录）。
+    with _events_lock():
+        nums = [int(TASK_RE.match(f).group(1)) for f in task_files() if TASK_RE.match(f)]
+        num = (max(nums) + 1) if nums else 1
+        task_id = f"TASK-{num:03d}"
+        name = f"{task_id}-{slug}"
+        path = os.path.join(TASKS_DIR, name + ".md")
+        if os.path.exists(path):
+            die(f"已存在: {path}")
+        template = ""
+        if os.path.exists(TEMPLATE):  # TASK-089：with 关闭，消 ResourceWarning/fd 泄漏
+            with open(TEMPLATE, encoding="utf-8") as f:
+                template = f.read()
+        if not template:
+            die("模板缺失: runtime/tasks/TASK.template.md")
+        now = today()
+        body = (template
+                .replace("TASK-000-<slug>", name)
+                .replace("一句话说明任务目标", desc)
+                .replace("  status: open", f"  status: open")
+                .replace("  created: YYYY-MM-DD", f"  created: {now}")
+                .replace("  updated: YYYY-MM-DD", f"  updated: {now}")
+                .replace("  priority: P2", f"  priority: {opts.get('--priority', 'P2')}")
+                .replace("  risk: P2", f"  risk: {opts.get('--risk', 'P2')}")
+                .replace("  approval-ref: none", f"  approval-ref: {opts.get('--approval-ref', 'none')}")
+                .replace("  assignee: any", f"  assignee: {opts.get('--assignee', 'any')}")
+                .replace("  reviewer: any", f"  reviewer: {opts.get('--reviewer', 'any')}"))
+        if opts.get("--parent"):
+            body = body.replace("  parent: TASK-000", f"  parent: {opts['--parent']}")
+        body = body.replace("TASK-000 — 任务标题", f"{task_id} — {desc}")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(body)
     print(f"✓ 已创建 {name}.md")
     print(f"  编辑: {path}")
     print(f"  开始: task start {task_id}")
@@ -224,6 +282,56 @@ def cmd_start(args):
 # 本模块经文件头部模块级包装复用；事件文件 = <LOG_DIR>/task-events.jsonl。
 
 
+def _write_status(status_path, **fields):
+    """写 verify 状态文件（TASK-088）：JSON 原子替换，读方不会看到半截内容。
+
+    人类/监控端以 mtime 判活（与 autoloop heartbeat 同构，events.py）。"""
+    os.makedirs(os.path.dirname(status_path), exist_ok=True)
+    payload = dict(fields)
+    payload["updated_at"] = datetime.datetime.now().isoformat()
+    tmp = status_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, status_path)
+    return status_path
+
+
+def _run_step_streamed(cmd, cwd, step, status_path, hb_interval=30.0, extra=None):
+    """流式执行一条 verify 命令（TASK-088，替代 capture_output 静默长跑）。
+
+    - 输出逐行实时转发到终端：UE 等长构建不再是黑屏，人类直接看构建日志判进度；
+    - 执行期间周期写 status_path（step/pid/elapsed_s/updated_at），mtime 判活；
+    - 返回 (returncode, 合并输出)，transcript 语义与旧 capture_output 一致。
+    """
+    proc = subprocess.Popen(cmd, shell=True, cwd=cwd,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, encoding="utf-8", errors="replace")
+    stop = threading.Event()
+    started = time.monotonic()
+
+    def _beat():
+        while not stop.wait(hb_interval):
+            _write_status(status_path, step=step, pid=proc.pid,
+                          elapsed_s=int(time.monotonic() - started), **(extra or {}))
+
+    _write_status(status_path, step=step, pid=proc.pid, elapsed_s=0, **(extra or {}))
+    hb = threading.Thread(target=_beat, daemon=True)
+    hb.start()
+    lines = []
+    for line in proc.stdout:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+        lines.append(line)
+    proc.stdout.close()  # Popen 不自动关管道读端；autoloop 长跑反复执行，防 fd 泄漏
+    rc = proc.wait()
+    stop.set()
+    hb.join()
+    _write_status(status_path, step=step, pid=proc.pid,
+                  elapsed_s=int(time.monotonic() - started),
+                  returncode=rc, **(extra or {}))
+    return rc, "".join(lines)
+
+
 def cmd_verify(args):
     """真正执行 config.commands.build/lint/test/check（不是查文件形状），全部通过才写 VERIFY 记录。"""
     if not args:
@@ -241,17 +349,17 @@ def cmd_verify(args):
         die(str(e))
 
     steps = ["build", "lint", "test", "check"]
+    status_path = os.path.join(LOG_DIR, "verify-status.json")
     transcript = [f"# Verify — {task_id} — {datetime.datetime.now().isoformat()}", ""]
     for step in steps:
         cmd = cfg["commands"][step]
         print(f"▶ {step}: {cmd}")
         transcript.append(f"$ {cmd}   # {step}")
-        proc = subprocess.run(cmd, shell=True, cwd=AI_DIR, capture_output=True, text=True,
-                              encoding="utf-8", errors="replace")
-        transcript.append(proc.stdout)
-        transcript.append(proc.stderr)
-        if proc.returncode != 0:
-            transcript.append(f"✗ {step} 失败（exit {proc.returncode}）")
+        rc, out = _run_step_streamed(cmd, cwd=AI_DIR, step=step,
+                                     status_path=status_path, extra={"task": task_id})
+        transcript.append(out)
+        if rc != 0:
+            transcript.append(f"✗ {step} 失败（exit {rc}）")
             os.makedirs(LOG_DIR, exist_ok=True)
             fail_log = os.path.join(LOG_DIR, f"fail-{today()}.log")
             with open(fail_log, "a", encoding="utf-8") as f:
@@ -260,8 +368,14 @@ def cmd_verify(args):
             tail_lines = "\n".join(transcript).splitlines()[-100:]
             with open(tail_log, "w", encoding="utf-8") as f:
                 f.write("\n".join(tail_lines) + "\n")
+            fail_log_rel = os.path.relpath(fail_log, AI_DIR)
+            # 评估自动采集（TASK-093）：失败即落盘 failures.jsonl，旁路不阻塞 die
+            try:
+                tasklib.collect_verify_failure(AI_DIR, task_id, cmd, fail_log_rel)
+            except Exception as e:  # noqa: BLE001 —— 旁路采集不得影响失败报告
+                print(f"⚠ 评估采集异常（主流程不受影响）: {e}", file=sys.stderr)
             die(
-                f"{step} 未通过，详情见 {os.path.relpath(fail_log, AI_DIR)}；"
+                f"{step} 未通过，详情见 {fail_log_rel}；"
                 f"尾部见 {os.path.relpath(tail_log, AI_DIR)}"
             )
 
@@ -305,10 +419,13 @@ def cmd_done(args):
 
 
 def cmd_block(args):
+    if len(args) < 2 or not args[1].strip():
+        die("task block 需要 <task-id> <原因>；阻塞原因必填（TASK-099）："
+            "示例 task block TASK-001 \"等待上游 API 交付\"")
     path = find_task(args[0])
     if not path:
         die(f"未找到任务: {args[0]}")
-    reason = args[1] if len(args) > 1 else "（未填原因）"
+    reason = args[1].strip()
     set_status(path, "blocked", ev="task.blocked", reason=reason)
     append_blocker(args[0], reason)
     print("提示: 更新 runtime/states/CURRENT_FOCUS.md")
@@ -326,6 +443,20 @@ def cmd_review(args):
     path = find_task(args[0])
     if not path:
         die(f"未找到任务: {args[0]}")
+    # TASK-101 硬拦截：reviewer 未指定（any/空/none）的任务转 in-review 后，机械层
+    # 判 fast-path，reviewer 循环会静默跳过（TASK-099/100 两次实录）。判定复用
+    # tasklib.is_fast_path 同一函数（单一事实源，不写第二套），在事故发生的转换点
+    # 使不一致状态无法被创造。die 先于任何状态变更/事件写入。
+    _, fm = load_task(path)
+    if fm is None:
+        die(f"frontmatter 缺失或损坏: {path}")
+    if tasklib.is_fast_path(fm):
+        reviewer = (fm.get("metadata.reviewer") or "any").strip() or "any"
+        die(f"{short_id(os.path.basename(path))} front-matter reviewer={reviewer}，转 in-review 后将被机械判为\n"
+            f"  fast-path，reviewer 循环会静默跳过（TASK-099/100 两次实录）。\n"
+            f"  二选一：\n"
+            f"  ① 编辑 front-matter 指定 reviewer（完整路径，由独立会话审查）\n"
+            f"  ② 走 fast-path：确认 VERIFY 记录存在后直接 task done")
     set_status(path, "in-review", ev="task.review_requested")
     touch_focus(args[0])
     print("提示: 审查通过后 task approve TASK-xxx 关闭；需返工则 task start TASK-xxx（回 in-progress）")
@@ -496,6 +627,103 @@ def cmd_stats(args):
         print(f"{s:<12} {cnt.get(s, 0)}")
 
 
+def _read_jsonl(path):
+    """读 jsonl 为 list[dict]；文件缺失/为空 → []；坏行 stderr 告警后跳过（TASK-093）。"""
+    if not os.path.isfile(path):
+        return []
+    rows = []
+    with open(path, encoding="utf-8") as f:
+        for ln, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except ValueError:
+                print(f"⚠ {path}:{ln} 非合法 JSON，已跳过", file=sys.stderr)
+    return rows
+
+
+def cmd_metrics(args):
+    """评估汇总（TASK-093）：done 率 / 平均 rework-count / token 估算合计。
+
+    - done 率：runtime/tasks 全量实时口径（status=done / 全部任务）。
+    - 平均 rework-count：优先 metrics/task-metrics.jsonl 采集数据（--days 按 done_at
+      收窄）；无采集数据时回退实时 frontmatter（采集自 TASK-093 上线，历史任务过渡）。
+    - token 估算合计：聚合 runtime/logs/token-usage.jsonl（--days 按 ts 收窄）；
+      文件缺失/为空输出 N/A 不报错（退出码 0）。
+    """
+    days = None
+    if "--days" in args:
+        i = args.index("--days")
+        if i + 1 >= len(args):
+            die("--days 需要一个整数参数，如: task metrics --days 30")
+        try:
+            days = int(args[i + 1])
+        except ValueError:
+            die(f"--days 需要整数，得到: {args[i + 1]}")
+        args = args[:i] + args[i + 2:]
+    if args:
+        die(f"未知参数: {' '.join(args)}")
+
+    cutoff = None
+    if days is not None:
+        cutoff = (datetime.date.today() - datetime.timedelta(days=days)).isoformat()
+
+    # done 率（实时全量）+ 回退用 rework 列表
+    total = done_cnt = 0
+    reworks = []
+    for f in task_files():
+        _, fm = load_task(os.path.join(TASKS_DIR, f))
+        if not fm:
+            continue
+        total += 1
+        if (fm.get("metadata.status") or "") == "done":
+            done_cnt += 1
+        try:
+            reworks.append(int(str(fm.get("metadata.rework-count") or 0).strip() or 0))
+        except ValueError:
+            reworks.append(0)
+    pct = (done_cnt * 100.0 / total) if total else 0.0
+    print(f"done 率: {done_cnt}/{total} ({pct:.1f}%)")
+
+    # 平均 rework-count（采集数据优先，空则回退实时）
+    records = _read_jsonl(os.path.join(tasklib.evaluation_dir(AI_DIR),
+                                       "metrics", "task-metrics.jsonl"))
+    if cutoff is not None:
+        records = [r for r in records if str(r.get("done_at") or "") >= cutoff]
+    if records:
+        vals = [r["rework-count"] for r in records
+                if isinstance(r.get("rework-count"), (int, float))]
+        avg = (sum(vals) / len(vals)) if vals else 0.0
+        src = "metrics/task-metrics.jsonl"
+    else:
+        avg = (sum(reworks) / len(reworks)) if reworks else 0.0
+        src = "runtime/tasks 实时回退（无采集数据）"
+    print(f"平均 rework-count: {avg:.2f}（来源: {src}）")
+
+    # token 估算合计
+    usage = _read_jsonl(os.path.join(LOG_DIR, "token-usage.jsonl"))
+    tokens = 0
+    if usage:
+        cutoff_ts = None
+        if cutoff is not None:
+            cutoff_ts = datetime.datetime.combine(
+                datetime.date.fromisoformat(cutoff), datetime.time.min).timestamp()
+        for r in usage:
+            ts = r.get("ts")
+            if cutoff_ts is not None and isinstance(ts, (int, float)) and ts < cutoff_ts:
+                continue
+            v = r.get("token_estimate")
+            if isinstance(v, (int, float)):
+                tokens += int(v)
+        token_txt = str(tokens)
+    else:
+        token_txt = "N/A"
+    window = f"（近 {days} 天）" if days is not None else ""
+    print(f"token 估算合计: {token_txt}{window}")
+
+
 def main():
     args = sys.argv[1:]
     if not args or args[0] in ("help", "-h", "--help"):
@@ -508,6 +736,7 @@ def main():
         "done": cmd_done, "block": cmd_block,
         "unblock": cmd_unblock, "cancel": cmd_cancel,
         "validate": cmd_validate, "index": cmd_index, "stats": cmd_stats,
+        "metrics": cmd_metrics,
     }
     fn = cmds.get(cmd)
     if not fn:

@@ -1,4 +1,4 @@
-"""agent_payload.py — AIOS 遥测 payload 构造与序列化（kit/tools/agent/ payload 层）。
+"""agent_payload.py — AIOS 遥测 payload 构造与序列化（kit/tools/telemetry/ payload 层）。
 
 消费 TASK-023 `agent_runtime.read_project_runtime()` 的 runtime 快照，输出通用遥测格式：
 
@@ -36,6 +36,19 @@ MAX_TASK_EVENTS = 200  # TASK-066：task 事件流单批上限（事件为结构
 MAX_CONTENT_CHARS = 4096
 MAX_PAYLOAD_BYTES = 256 * 1024  # 256 KiB
 TRUNCATION_SUFFIX = "…[truncated]"
+# TASK-104 session 日志流（消息级增量）：
+# 单批上限 200KiB——必须 < MAX_PAYLOAD_BYTES(256KiB)，为快照/事件预留空间；
+# （验收标准「如 256KB」为量级示意；真正的整体上限由 validate_capacity 兜底，
+#   超过会 PayloadTooLargeError 导致整轮推送失败——故 session 批上限必须留余量。）
+MAX_SESSION_BYTES = 200 * 1024
+# 单行上限：超长行（如巨型 toolResult）截断加 TRUNCATION_SUFFIX 后照常计入，
+# 保证任何单行 ≤ 上限 < 单批预算，积压可逐轮推进、不永久堵批。
+MAX_SESSION_LINE_BYTES = 64 * 1024
+# 预算低于此值时本轮省略 session 增量（心跳优先，session 下轮再推，游标不动）。
+MIN_SESSION_BUDGET = 1024
+# 预算中扣除的包装开销余量（items 结构键、task_id/name、sessions.cursor 映射表——
+# 后者随 session 文件数线性增长，取保守值）。
+SESSION_ACCOUNT_MARGIN = 32 * 1024
 
 
 class PayloadError(Exception):
@@ -76,7 +89,8 @@ def _truncate_content_entries(entries, limit):
     return out
 
 
-def build_payload(project_id, snapshot, ts=None, task_events=None, cursor=None):
+def build_payload(project_id, snapshot, ts=None, task_events=None, cursor=None,
+                  sessions=None):
     """构造 AIOS 遥测 payload dict（应用条目数与单条内容截断）。
 
     参数:
@@ -88,12 +102,16 @@ def build_payload(project_id, snapshot, ts=None, task_events=None, cursor=None):
             payload 不含 events/cursor 键）；空列表表示已启用但本轮无新事件。
         cursor:     TASK-066 可选——本次推送覆盖到的最大 seq（int 或 None）。
             仅在 task_events 非 None 时写入 payload。
+        sessions:   TASK-104 可选——session 日志增量部分（dict：{items, truncated,
+            cursor}，由 agent_loop._incremental_sessions 组装）。None 表示未启用
+            session 流（向后兼容，payload 不含 sessions 键）。
     返回:
         {"project_id", "ts", "files": {...}}；启用事件流时额外含
-        {"events": [...], "cursor": ...}
+        {"events": [...], "cursor": ...}；启用 session 流时额外含
+        {"sessions": {"items": [...], "truncated": bool, "cursor": {...}}}
     异常:
         PayloadError: project_id 缺失/非字符串/空白；snapshot 非 dict；ts 非数字；
-            task_events 非 list；cursor 非 int/None
+            task_events 非 list；cursor 非 int/None；sessions 非 dict 或内部字段非法
     """
     if not isinstance(project_id, str) or not project_id.strip():
         raise PayloadError("project_id 必须是非空字符串（agent.json projects[].id）")
@@ -134,6 +152,28 @@ def build_payload(project_id, snapshot, ts=None, task_events=None, cursor=None):
                 cursor = max_seq
         payload["events"] = included
         payload["cursor"] = cursor
+    if sessions is not None:
+        # TASK-104：session 增量部分（items 为按 task 分组的原始 jsonl 行文本，
+        # 由 agent_loop._incremental_sessions 组装并完成体积/单行截断；此处只做类型防御）。
+        if not isinstance(sessions, dict):
+            raise PayloadError("sessions 必须是 dict（{items, truncated, cursor}）")
+        items = sessions.get("items")
+        truncated = sessions.get("truncated")
+        session_cursor = sessions.get("cursor")
+        if not isinstance(items, list):
+            raise PayloadError("sessions.items 必须是 list")
+        if not isinstance(truncated, bool):
+            raise PayloadError("sessions.truncated 必须是 bool")
+        if not isinstance(session_cursor, dict) or not all(
+                isinstance(k, str) and k
+                and isinstance(v, int) and not isinstance(v, bool) and v >= 0
+                for k, v in session_cursor.items()):
+            raise PayloadError("sessions.cursor 必须是 {非空字符串: 非负整数}")
+        payload["sessions"] = {
+            "items": items,
+            "truncated": truncated,
+            "cursor": dict(session_cursor),
+        }
     return payload
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""kit/tools/agent/ — AIOS 遥测推送 agent（入口）。
+"""kit/tools/telemetry/ — AIOS 遥测推送 agent（入口）。
 
 用法:
     python3 agent.py --check-config [--config agent.json]         # 只校验配置（exit 0/1）

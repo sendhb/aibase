@@ -1,0 +1,11 @@
+{"created": "2026-09-03", "done_at": "2026-09-04", "duration_days": 1, "priority": "P2", "rework-count": 0, "risk": "P2", "task": "TASK-092-rename-agent-telemetry", "updated": "2026-09-04"}
+{"created": "2026-09-03", "done_at": "2026-09-04", "duration_days": 1, "priority": "P1", "rework-count": 1, "risk": "P2", "task": "TASK-093-evaluation-auto-collect", "updated": "2026-09-04"}
+{"created": "2026-09-04", "done_at": "2026-09-04", "duration_days": 0, "priority": "P2", "rework-count": 0, "risk": "P2", "task": "TASK-103-pi-session-dir-logging", "updated": "2026-09-04"}
+{"created": "2026-09-03", "done_at": "2026-09-04", "duration_days": 1, "priority": "P1", "rework-count": 0, "risk": "P2", "task": "TASK-094-context-loader", "updated": "2026-09-04"}
+{"created": "2026-09-03", "done_at": "2026-09-04", "duration_days": 1, "priority": "P2", "rework-count": 0, "risk": "P3", "task": "TASK-096-reflect-mechanical", "updated": "2026-09-04"}
+{"created": "2026-09-03", "done_at": "2026-09-04", "duration_days": 1, "priority": "P2", "rework-count": 0, "risk": "P2", "task": "TASK-095-session-checkpoint-resume", "updated": "2026-09-04"}
+{"created": "2026-09-03", "done_at": "2026-09-05", "duration_days": 2, "priority": "P2", "rework-count": 0, "risk": "P2", "task": "TASK-097-mcp-server", "updated": "2026-09-05"}
+{"created": "2026-09-03", "done_at": "2026-09-05", "duration_days": 2, "priority": "P2", "rework-count": 0, "risk": "P3", "task": "TASK-098-harness-reaudit-adr", "updated": "2026-09-05"}
+{"created": "2026-09-04", "done_at": "2026-09-05", "duration_days": 1, "priority": "P2", "rework-count": 0, "risk": "P2", "task": "TASK-101-review-guard", "updated": "2026-09-05"}
+{"created": "2026-09-05", "done_at": "2026-09-05", "duration_days": 0, "priority": "P2", "rework-count": 0, "risk": "P2", "task": "TASK-105-re-init-kit", "updated": "2026-09-05"}
+{"created": "2026-09-04", "done_at": "2026-09-05", "duration_days": 1, "priority": "P2", "rework-count": 0, "risk": "P2", "task": "TASK-104-session-log-web-live", "updated": "2026-09-05"}

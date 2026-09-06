@@ -112,6 +112,23 @@ class AgentAdapterConfigTests(unittest.TestCase):
         with self.assertRaises(downlink.DownlinkError):
             agent_adapter.AgentAdapter("http://x", "  ")
 
+    # ---- TASK-083：server_url 带 /api/ingest 后缀（agent.json 文档形态）→ 归一化为裸 origin ----
+
+    def test_server_url_ingest_suffix_normalized(self):
+        a = agent_adapter.AgentAdapter("http://127.0.0.1:9/api/ingest/", "tok")
+        self.assertEqual(a.server_url, "http://127.0.0.1:9")
+
+    def test_server_url_bare_origin_unchanged(self):
+        self.assertEqual(agent_adapter.AgentAdapter("http://127.0.0.1:9", "tok").server_url,
+                         "http://127.0.0.1:9")
+
+    def test_aimonitor_base_url_edges(self):
+        f = agent_adapter.aimonitor_base_url
+        self.assertEqual(f("http://h:1/api/ingest"), "http://h:1")
+        self.assertEqual(f("http://h:1/"), "http://h:1")
+        self.assertEqual(f("http://h:1/foo"), "http://h:1/foo")  # 非 ingest 路径不误剥
+        self.assertEqual(f("http://h:1/api/ingestx"), "http://h:1/api/ingestx")  # 同前缀兄弟不误剥
+
 
 class AgentAdapterEnqueueTests(unittest.TestCase):
     def test_enqueue_200_returns_id_not_reused(self):
@@ -267,6 +284,18 @@ class ProbeAimonitorTests(unittest.TestCase):
         self.assertEqual(counts["open"], 1)
         self.assertEqual(counts["done"], 1)
 
+    def test_fetch_counts_ingest_suffix_normalized(self):
+        # TASK-083：/api/status 自 origin 起根，带 /api/ingest 后缀的 server_url 须归一
+        seen = {}
+
+        def http_fn(url):
+            seen["url"] = url
+            return {"projects": []}
+
+        self.assertIsNone(probe.fetch_aimonitor_counts("http://x:1/api/ingest", "far-a",
+                                                       http_fn=http_fn))
+        self.assertEqual(seen["url"], "http://x:1/api/status")
+
     def test_fetch_counts_unreachable_or_missing(self):
         self.assertIsNone(probe.fetch_aimonitor_counts("http://x", "far-a",
                                                        http_fn=lambda u: 1 / 0))
@@ -289,6 +318,17 @@ class ProbeAimonitorTests(unittest.TestCase):
         self.assertIn("priority: P2", content)
         self.assertIn("approval-ref:", content)
         self.assertIn("rework-count: 0", content)
+
+    def test_snapshot_ingest_suffix_normalized(self):
+        seen = {}
+
+        def http_fn(url):
+            seen["url"] = url
+            return {"projects": []}
+
+        self.assertIsNone(probe.snapshot_from_aimonitor("http://x:1/api/ingest",
+                                                        _entry("far-a"), http_fn=http_fn))
+        self.assertEqual(seen["url"], "http://x:1/api/status")
 
     def test_snapshot_unreachable_or_unregistered(self):
         self.assertIsNone(probe.snapshot_from_aimonitor("http://x", _entry("far-a"),

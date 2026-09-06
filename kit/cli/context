@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ====================================================================
+# 本脚本是 Python 3。请勿用 bash/sh 直接调用（如 `bash kit/cli/context`）：
+# bash 会把 Python 源码当 shell 逐行解析，产生巨量错误输出（同 TASK-031
+# 根因防护，见 kit/cli/task 头注释）。
+# 正确调用：./kit/cli/context <TASK-ID>  或  python3 kit/cli/context <TASK-ID>
+# ====================================================================
+"echo" "✗ 本脚本是 Python 3，请勿用 bash/sh 调用（bash 会把 Python 源码当 shell 逐行解析）。正确用法: ./kit/cli/context <TASK-ID> 或 python3 kit/cli/context <TASK-ID>"
+"exit" "1"
+"""context — 上下文装配薄入口（TASK-094，核心在 lib/context_loader.py）
+
+用法:
+  context TASK-001 [--budget N] [--root DIR]
+
+按 task 推导最小文件集（TASK 本体 > depends-on > checkpoint > 模块文档 > 源文件），
+机械执行 Filter（排除 generated_dirs/二进制）与预算截断（默认 600 行，
+AGENTS.md 原则推导），输出路径/行数/预算占比三列清单。
+"""
+import argparse
+import os
+import sys
+
+_LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                    "cli", "lib")
+if _LIB not in sys.path:
+    sys.path.insert(0, _LIB)
+
+import context_loader  # noqa: E402
+
+USAGE = __doc__
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="context", description=USAGE,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("task_id", help="任务 ID，如 TASK-094")
+    parser.add_argument("--budget", type=int, default=None,
+                        help="总行预算（默认 %d，AGENTS.md 原则推导）"
+                             % context_loader.DEFAULT_BUDGET)
+    parser.add_argument("--root", default=None, help="项目根（默认向上探测 aios.config.yaml）")
+    args = parser.parse_args(argv)
+
+    plan = context_loader.assemble(args.task_id, root=args.root, budget=args.budget)
+    if plan is None:
+        print("✗ 未找到任务: %s（runtime/tasks/ 下不存在）" % args.task_id, file=sys.stderr)
+        return 1
+    print(plan.render())
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -14,13 +14,15 @@ autoloop-reviewer-events.jsonl 事件一致），供 TASK-025 启动器 import �
   - events  : heartbeat / emit_event（autoloop-reviewer-events.jsonl，格式逐字节一致）
   - llm     : TIMEOUT_EXIT / EXIT_NOT_FOUND / _provider_argv / _deepseek_env
   - lock    : _open_lock / _acquire / _release（进程级防重入，TASK-012）
-  - autoloop_coder : _resolve_provider_argv / _run_argv（Windows provider 包装与
-              Popen 超时杀进程语义，TASK-023 交付——两个角色是同一"调用层"，
-              import 复用避免 SMELL-001 式重复维护）
+  - autoloop_coder : _resolve_provider_argv / _run_argv / _open_task_log /
+              prepare_session_dir（Windows provider 包装、Popen 超时杀进程语义、
+              per-task 会话日志与 session 目录，TASK-023/TASK-100/TASK-103 交付
+              ——两个角色是同一"调用层"，import 复用避免 SMELL-001 式重复维护）
 
 Windows provider 包装：与 autoloop_coder 一致——`pi` 在 Windows 是 npm `.cmd`
-代理，经 Git Bash `bash <posix-script> -p <prompt> --no-session` 单 argv 传参
-（无注入）；找不到回落 `llm._provider_argv`（Popen → 127）。
+代理，经 Git Bash `bash <posix-script> -p <prompt> [--session-dir <dir> |
+--no-session]` 单 argv 传参（无注入）；找不到回落 `llm._provider_argv`
+（Popen → 127）。
 
 纯 stdlib，零外部依赖（与 lib/config.py、lib/tasklib.py、lib/events.py 一致）。
 """
@@ -36,11 +38,14 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-from autoloop_coder import _resolve_provider_argv, _run_argv  # noqa: E402（Windows provider 包装复用）
+from autoloop_coder import (  # noqa: E402（Windows provider 包装 + per-task 日志复用）
+    _open_task_log, _resolve_provider_argv, _run_argv, prepare_session_dir,
+)
 import events  # noqa: E402
 import llm  # noqa: E402
 import lock  # noqa: E402
 import tasklib  # noqa: E402
+import context_loader  # noqa: E402  装配清单注入（TASK-094）
 
 NAME = "reviewer"  # 心跳/事件文件名：autoloop-reviewer.heartbeat / -events.jsonl
 DEFAULT_INTERVAL = 300
@@ -107,7 +112,7 @@ def _task_cli(root, *args):
 # ---------------- LLM 调用（事件名 reviewer） ----------------
 
 def run_llm_reviewer(provider, prompt, *, log_dir, task, timeout=None,
-                     unattended=False, log_file=None):
+                     unattended=False, log_file=None, root=None):
     """运行一次 LLM provider 并写 ok/timeout/error 事件（供 run_once 使用）。
 
     等价旧 autoloop-reviewer 的调用链：
@@ -115,14 +120,20 @@ def run_llm_reviewer(provider, prompt, *, log_dir, task, timeout=None,
       + `emit_event <task> ok|timeout|error`
     argv 复用 autoloop_coder._resolve_provider_argv（Windows pi 包装），
     事件写入 autoloop-reviewer-events.jsonl（NAME="reviewer"）。
+    会话输出按 task 落盘（TASK-100，与 coder 同款）：per-task log 单文件追加，
+    reviewer 轮与 coder 轮共存一个文件（轮次头区分角色）。
+    pi 会话全量另落 `runtime/logs/sessions/<TASK-ID>/`（TASK-103，复用 coder 的
+    prepare_session_dir，降级语义一致）。
     """
-    argv, env = _resolve_provider_argv(provider, prompt, unattended=unattended)
-    out = None
+    session_dir = prepare_session_dir(provider, log_dir, task)
+    argv, env = _resolve_provider_argv(provider, prompt, unattended=unattended,
+                                       session_dir=session_dir)
+    out, on_start = _open_task_log(log_dir, task, role=NAME, provider=provider,
+                                   fallback_log=log_file)
     try:
-        if log_file:
-            out = open(log_file, "a", encoding="utf-8", errors="replace")
         rc = _run_argv(argv, env, timeout=timeout, stdout=out,
-                       stderr=subprocess.STDOUT)
+                       stderr=subprocess.STDOUT, root=root,
+                       llm_name=provider, task_id=task, on_start=on_start)
     finally:
         if out is not None:
             out.close()
@@ -168,13 +179,14 @@ def pick_in_review(tasks_dir, agent_id, log_fn=None):
 
 # ---------------- prompt ----------------
 
-def build_prompt(task_id, task_basename, agent_id, reviewer_depth):
+def build_prompt(task_id, task_basename, agent_id, reviewer_depth, assembly=None):
     """构建 Reviewer 提示词（与旧 Bash autoloop-reviewer 文本一致）。
 
     reviewer_depth: "六维（P0/P1）" 或 "三问（P2）"（按任务 risk/priority 分级）；
     agent_id 写入 REVIEW 记录的 reviewer 字段。
+    assembly: context_loader 装配清单文本（TASK-094；None/空则省略该节）。
     """
-    return (
+    text = (
         "你现在扮演 Reviewer 角色。任务：%s（见 runtime/tasks/%s）。\n"
         "先读 kit/cli/autoloop-boot.md（速查）与 kit/runtime/reviews/REVIEW.template.md（分级模板）。\n"
         "你不是这个任务的实现者，本次是独立会话审查，禁止修改被审查的代码（审查 ≠ 修复）。\n"
@@ -200,6 +212,13 @@ def build_prompt(task_id, task_basename, agent_id, reviewer_depth):
         "（巨量输出死循环，脚本已自带防护）。"
     ) % (task_id, task_basename, task_id, task_id, reviewer_depth, agent_id,
          task_id, task_id, task_id)
+    if assembly:
+        text += (
+            "\n装配清单（context loader 已按预算截断；只读清单内文件，"
+            "禁止全仓扫描或 knowledge/ 通读；标注 [TRUNCATED 到第 N 行] 的文件"
+            "只读前 N 行）：\n%s\n"
+        ) % assembly
+    return text
 
 
 # ---------------- 主循环 ----------------
@@ -241,10 +260,17 @@ def run_once(root, opts, log_file, log_dir, task_cli_fn=None, llm_fn=None):
         reviewer_depth = "三问（P2）"
 
     log("▶ 开始审查 %s" % task_id, log_file)
-    prompt = build_prompt(task_id, os.path.basename(task_file), opts.id, reviewer_depth)
+    # 装配清单注入（TASK-094）：机械执行最小读取，替代纯规劝；失败 fail-open（prompt 照发）
+    try:
+        plan = context_loader.assemble(task_id, root=root)
+        assembly = plan.render() if plan is not None else ""
+    except Exception:  # noqa: BLE001 —— 装配失败不阻塞会话
+        assembly = ""
+    prompt = build_prompt(task_id, os.path.basename(task_file), opts.id, reviewer_depth,
+                          assembly=assembly)
     rc = llm_fn(opts.llm, prompt,
                 log_dir=log_dir, task=task_id, timeout=opts.timeout,
-                unattended=opts.unattended, log_file=log_file)
+                unattended=opts.unattended, log_file=log_file, root=root)
     if rc == llm.TIMEOUT_EXIT:
         log("✗ %s 会话超时（>%ss），已 kill" % (task_id, opts.timeout), log_file)
     elif rc != 0:

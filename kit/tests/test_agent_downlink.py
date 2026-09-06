@@ -23,7 +23,7 @@ import unittest
 
 sys_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import sys  # noqa: E402
-sys.path.insert(0, os.path.join(sys_path, "kit", "tools", "agent"))
+sys.path.insert(0, os.path.join(sys_path, "kit", "tools", "telemetry"))
 
 import agent_downlink as dl  # noqa: E402
 import agent_http  # noqa: E402
@@ -342,6 +342,64 @@ class HttpTests(unittest.TestCase):
                                                  "stdout_tail": "", "stderr_tail": "",
                                                  "finished_at": "Z"})
         self.assertEqual(out, "already-terminal")  # 409 幂等忽略
+
+    # ---- TASK-083：server_url 带 /api/ingest 后缀（生产 agent.json 文档形态）→ 下行端点 base 推导 ----
+
+    def test_derive_base_strips_ingest_suffix(self):
+        self.assertEqual(dl.derive_downlink_base_url("http://h:1/api/ingest"), "http://h:1")
+        self.assertEqual(dl.derive_downlink_base_url("http://h:1/api/ingest/"), "http://h:1")
+
+    def test_derive_base_bare_origin_unchanged(self):
+        self.assertEqual(dl.derive_downlink_base_url("http://h:1"), "http://h:1")
+        self.assertEqual(dl.derive_downlink_base_url("http://h:1/"), "http://h:1")
+
+    def test_derive_base_other_path_preserved(self):
+        # 非 /api/ingest 后缀（含 /api/ingestx 这种同前缀兄弟）不误剥
+        self.assertEqual(dl.derive_downlink_base_url("http://h:1/foo"), "http://h:1/foo")
+        self.assertEqual(dl.derive_downlink_base_url("http://h:1/api/ingestx"),
+                         "http://h:1/api/ingestx")
+
+    def test_pickup_ingest_suffixed_server_url_hits_bare_path(self):
+        # 生产复现形态：server_url 带 /api/ingest → 请求必须落在裸 /api/downlink/pickup
+        seen = {}
+
+        class H(http.server.BaseHTTPRequestHandler):  # noqa: E306
+            def do_GET(self):
+                seen["path"] = self.path
+                body = b'{"command": null}'
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        base = self._serve(H)
+        self.assertIsNone(dl.pickup_command(base + "/api/ingest", "tok"))
+        self.assertEqual(seen["path"], "/api/downlink/pickup")
+
+    def test_report_ingest_suffixed_server_url_hits_bare_path(self):
+        seen = {}
+
+        class H(http.server.BaseHTTPRequestHandler):  # noqa: E306
+            def do_POST(self):
+                seen["path"] = self.path
+                body = b'{"command_id": 7, "status": "done"}'
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        base = self._serve(H)
+        out = dl.report_result(base + "/api/ingest", "tok", 7,
+                               {"status": "done", "exit_code": 0,
+                                "stdout_tail": "", "stderr_tail": "", "finished_at": "Z"})
+        self.assertEqual(seen["path"], "/api/downlink/commands/7/result")
+        self.assertEqual(out, {"command_id": 7, "status": "done"})
 
 
 if __name__ == "__main__":

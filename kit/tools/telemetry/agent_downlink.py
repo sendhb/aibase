@@ -22,12 +22,33 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 import agent_http
 
 DOWNLINK_PICKUP_PATH = "/api/downlink/pickup"
 DOWNLINK_RESULT_PATH = "/api/downlink/commands/{command_id}/result"
+INGEST_PATH_SUFFIX = "/api/ingest"  # agent.json server_url 的文档契约形态（DEPLOY-DUAL-PLATFORM §4.4）
+
+
+def derive_downlink_base_url(server_url):
+    """server_url（ingest 完整地址）→ 下行端点 base（TASK-083）。
+
+    agent.json server_url 的文档形态含 /api/ingest 后缀，而下行端点自 origin 起根
+    （契约 §三/§四）——直接拼接产生 /api/ingest/api/downlink/* → 服务端 404
+    （生产复现 2026-09-01：aibase/x1prototype 每 30s 一条）。此处镜像
+    agent_register.derive_register_url 的既有成例：剥 /api/ingest 后缀；
+    裸 origin 或其他路径原样放行（rstrip('/') 归一，查询/片段丢弃与 register 一致）。
+    """
+    try:
+        parts = urllib.parse.urlsplit(str(server_url))
+    except ValueError as e:
+        raise agent_http.PushError(f"server_url 非法: {server_url!r}") from e
+    path = parts.path.rstrip("/")
+    if path.endswith(INGEST_PATH_SUFFIX):
+        path = path[: -len(INGEST_PATH_SUFFIX)]
+    return urllib.parse.urlunsplit((parts.scheme, parts.netloc, path, "", ""))
 
 # 命令白名单（契约 §二；agent 侧独立枚举——与 server 各自维护，防一处被改两处失守）
 COMMAND_WHITELIST = ("task_start", "autoloop_coder", "autoloop_reviewer")
@@ -136,7 +157,8 @@ def pickup_command(server_url, token, connect_timeout=agent_http.CONNECT_TIMEOUT
 
     401/4xx → PushRejectedError，5xx → PushServerError，网络 → PushNetworkError（可重试）。
     """
-    req = urllib.request.Request(server_url.rstrip("/") + DOWNLINK_PICKUP_PATH, method="GET")
+    req = urllib.request.Request(
+        derive_downlink_base_url(server_url) + DOWNLINK_PICKUP_PATH, method="GET")
     req.add_header("Authorization", "Bearer " + token)
     req.add_header("User-Agent", agent_http.USER_AGENT)
     opener = agent_http._build_opener(connect_timeout, read_timeout)
@@ -163,7 +185,7 @@ def report_result(server_url, token, command_id, report,
 
     已终态（409）→ 幂等忽略，返回 "already-terminal"；成功返回 server 响应 dict。
     """
-    url = server_url.rstrip("/") + DOWNLINK_RESULT_PATH.format(command_id=command_id)
+    url = derive_downlink_base_url(server_url) + DOWNLINK_RESULT_PATH.format(command_id=command_id)
     body = json.dumps(report, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(url, data=body, method="POST")
     req.add_header("Authorization", "Bearer " + token)

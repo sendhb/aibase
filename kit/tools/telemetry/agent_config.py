@@ -1,4 +1,4 @@
-"""agent_config.py — agent.json 配置加载与校验（kit/tools/agent/ 配置层）。
+"""agent_config.py — agent.json 配置加载与校验（kit/tools/telemetry/ 配置层）。
 
 零外部依赖（仅 stdlib），风格与 kit/cli/lib/config.py 一致：
 schema 固定，缺失必填字段/非法值直接抛 AgentConfigError（CLI 层捕获后

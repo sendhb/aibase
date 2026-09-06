@@ -1,7 +1,7 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-  注册 AIOS 遥测 agent（kit/tools/agent/agent.py）为 Windows 计划任务，实现常驻持续监控。
+  注册 AIOS 遥测 agent（kit/tools/telemetry/agent.py）为 Windows 计划任务，实现常驻持续监控。
 
 .DESCRIPTION
   创建计划任务 "AIOS Agent"（可 -TaskName 覆盖）：
@@ -21,7 +21,7 @@
   计划任务名，缺省 "AIOS Agent"。
 
 .PARAMETER Config
-  agent.json 绝对路径。缺省 = 仓库根 agent.json（脚本在 kit/tools/agent/ 时上溯 3 级）。
+  agent.json 绝对路径。缺省 = 仓库根 agent.json（脚本在 kit/tools/telemetry/ 时上溯 3 级）。
 
 .PARAMETER LogPath
   输出日志文件。缺省 = <仓库根>\runtime\logs\agent-aimonitor.log。
@@ -53,7 +53,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# 脚本所在目录 = kit/tools/agent；仓库根 = 上溯 3 级
+# 脚本所在目录 = kit/tools/telemetry；仓库根 = 上溯 3 级
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot  = (Resolve-Path (Join-Path $ScriptDir "..\..\..")).Path
 

@@ -3,7 +3,8 @@ llm.py — LLM 调用抽象（Python 版 llm.sh，TASK-022）
 
 供 Python 版 autoloop（TASK-088/089）import；封装三个 provider（迁移设计
 TASK-087 → docs/PYTHON-CLI-MIGRATION.md）：
-  - pi      : `pi -p <prompt> --no-session`（pi coding agent，TASK-009/012 默认）
+  - pi      : `pi -p <prompt> --no-session`（pi coding agent，TASK-009/012 默认；
+              autoloop 传 session_dir 时改用 `--session-dir`，TASK-103）
   - claude  : `claude -p <prompt> [--dangerously-skip-permissions]`
               （unattended=True 时追加跳过权限确认 flag，与旧 autoloop-coder 分支一致）
   - deepseek: 读 DEEPSEEK_API_KEY（env 优先，其次 ~/.pi/agent/models.json
@@ -32,10 +33,18 @@ TIMEOUT_EXIT = 124  # 与 GNU `timeout` CLI 退出码约定一致（超时被 ki
 PROVIDERS = ("claude", "deepseek", "pi")
 
 
-def _provider_argv(provider, prompt, unattended=False):
-    """provider + prompt → 子进程 argv 列表（列表形式，无 shell 注入）。"""
+def _provider_argv(provider, prompt, unattended=False, session_dir=None):
+    """provider + prompt → 子进程 argv 列表（列表形式，无 shell 注入）。
+
+    session_dir 仅对 pi 生效（TASK-103）：非空时以 `--session-dir <dir>` 落全量
+    会话 transcript；None（默认）保持 TASK-022 契约 `--no-session`（ephemeral）。
+    两 flag 互斥（--no-session 会覆盖 --session-dir，2026-09-04 真机实验），
+    实现上二选一。
+    """
     p = (provider or "").strip().lower()
     if p == "pi":
+        if session_dir:
+            return ["pi", "-p", prompt, "--session-dir", session_dir]
         return ["pi", "-p", prompt, "--no-session"]
     if p == "claude":
         argv = ["claude", "-p", prompt]

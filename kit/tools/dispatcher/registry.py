@@ -21,7 +21,7 @@ TASK-069：Phase 3 调度器骨架的注册表组件。
       ]
     }
 
-零外部依赖（仅 stdlib）。风格与 kit/tools/agent/agent_config.py 一致。
+零外部依赖（仅 stdlib）。风格与 kit/tools/telemetry/agent_config.py 一致。
 """
 import json
 import os

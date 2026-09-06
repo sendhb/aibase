@@ -1,4 +1,4 @@
-"""agent_register.py — Agent 注册状态机（kit/tools/agent/ 注册层）。
+"""agent_register.py — Agent 注册状态机（kit/tools/telemetry/ 注册层）。
 
 注册状态机管理 agent.json 中的注册状态流转：
 

@@ -1,0 +1,218 @@
+#!/usr/bin/env python3
+# ============================================================
+# re-init — 重建目标项目的 kit/（框架升级路径；薄壳，复用 init 全部逻辑）
+#
+# 背景（TASK-105）:
+#   init 是 no-clobber 安装器（已存在文件一律跳过），对已有 kit/ 重跑会产生
+#   "混合状态"（改过的保留旧版、新文件混入、删过的被补回），无法用于升级。
+#   框架约定 kit/ 只读、升级 = 整体替换。本命令把"备份 → 删 kit/ → 重装"
+#   封装成一步，并保证:
+#     - 只动 <目标>/kit/；项目可写区（aios.config.yaml / knowledge/ / docs/ /
+#       runtime/ / personas/active.md / .gitignore）一概不碰
+#     - 覆盖前自动备份为 kit.bak-<时间戳>/，init 失败自动回滚
+#     - 人格保真: init 对 personas/active.md 的任何分支都会改写它
+#       （默认继承源人格覆盖 / --no-persona 删除，见 init.apply_persona），
+#       所以默认给 init 传 --no-persona，成功后把事前快照还原；
+#       用户显式给 --persona / --no-persona 则按其指定、不还原
+#     - 完成后报告 新增/删除/更新 文件清单（哈希对账）
+#
+# 用法:
+#   python3 kit/cli/re-init <目标项目根目录> [init 选项原样透传]
+#
+#   升级三步（用户侧）:
+#     1. git -C /path/to/aibase pull            # 拉新版框架
+#     2. /path/to/aibase/kit/cli/re-init <目标> [--profile <type> ...]
+#     3. 确认无误后删除备份: rm -rf <目标>/kit.bak-<时间戳>
+#
+#   人格: 默认保留目标项目 personas/active.md；
+#         显式给 --persona <name> 或 --no-persona 则按用户指定执行。
+# ============================================================
+import datetime
+import hashlib
+import os
+import shutil
+import sys
+import tempfile
+from importlib.machinery import SourceFileLoader
+from importlib.util import module_from_spec, spec_from_file_location
+from pathlib import Path
+
+# Windows GBK 控制台 Unicode 防护（同 init/TASK-011）
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
+SCRIPT = Path(__file__).resolve()
+KIT = SCRIPT.parent.parent          # 本脚本所在的 kit/ = 框架（新版本）源
+
+
+def load_init_module():
+    """进程内加载 init（必须在删除任何东西之前——自升级场景下 init 也会被删）。"""
+    init_path = KIT / "cli" / "init"
+    if not init_path.is_file():
+        sys.exit(f"✗ 找不到 init: {init_path}")
+    # init 无 .py 扩展名，默认 loader 推断会失败 → 显式 SourceFileLoader
+    loader = SourceFileLoader("aios_init", str(init_path))
+    spec = spec_from_file_location("aios_init", str(init_path), loader=loader)
+    mod = module_from_spec(spec)
+    loader.exec_module(mod)         # init 顶层只有定义，main() 受 __main__ 守卫保护
+    return mod
+
+
+def has_persona_flag(argv):
+    return any(a == "--persona" or a.startswith("--persona=") or a == "--no-persona"
+               for a in argv)
+
+
+def snapshot(root):
+    """kit/ 内容快照: {相对路径: md5}。排除 __pycache__/*.pyc（init 会清理它们）。"""
+    out = {}
+    for p in Path(root).rglob("*"):
+        if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".pyc":
+            out[p.relative_to(root).as_posix()] = hashlib.md5(p.read_bytes()).hexdigest()
+    return out
+
+
+def report_changes(old, new):
+    added = sorted(new.keys() - old.keys())
+    removed = sorted(old.keys() - new.keys())
+    changed = sorted(k for k in old.keys() & new.keys() if old[k] != new[k])
+    print("变更对账（旧 kit/ → 新 kit/）:")
+    for label, items in (("新增", added), ("删除", removed), ("更新", changed)):
+        if not items:
+            continue
+        if len(items) <= 12:
+            print(f"  {label} {len(items)}: {', '.join(items)}")
+        else:
+            print(f"  {label} {len(items)}: {', '.join(items[:5])}, … 等")
+    if not (added or removed or changed):
+        print("  无差异（目标 kit/ 已与源一致）")
+
+
+def backup_kit(kit_dst):
+    """mv kit/ → kit.bak-<时间戳>/；同秒冲突加序号。返回备份路径。"""
+    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    bak = kit_dst.with_name(f"kit.bak-{ts}")
+    n = 0
+    while bak.exists():
+        n += 1
+        bak = kit_dst.with_name(f"kit.bak-{ts}-{n}")
+    shutil.move(str(kit_dst), str(bak))
+    return bak
+
+
+def main():
+    argv = sys.argv[1:]
+    if "-h" in argv or "--help" in argv:
+        print(__doc__)
+        sys.exit(0)
+
+    # 手动切分（勿用 argparse.parse_known_args: 它无法正确处理未知选项的
+    # 带值参数，--profile backend 的值会被吞成位置参数）。契约:
+    #   re-init <目标> [init 的全部选项与值原样透传]
+    # 透传参数由 init 自己的 argparse 校验，非法选项 → init SystemExit → 本脚本回滚。
+    if argv and not argv[0].startswith("-"):
+        target_arg, passthrough = argv[0], argv[1:]
+    else:
+        target_arg, passthrough = ".", argv[:]
+
+    target = Path(target_arg).expanduser().resolve()
+    kit_dst = target / "kit"
+
+    # 守卫 1: re-init 只重建已有 kit/；全新安装请用 init
+    if not kit_dst.is_dir():
+        sys.exit(f"✗ {target} 下没有 kit/ —— 全新安装请用 init，re-init 只做重建。")
+
+    # 守卫 2 + init 逻辑先加载（删除前完成，防自删除）
+    init_mod = load_init_module()
+    init_mod.guard_target(init_mod.SRC_ROOT, target)   # 目标在框架源仓库内 → init 自行拒绝
+
+    old = snapshot(kit_dst)
+    bak = backup_kit(kit_dst)
+    print(f"✓ 已备份旧 kit/ → {bak.name}")
+
+    # 人格策略: init 无“原样不动”选项（任何分支都会改写 active.md）。
+    # 默认传 --no-persona（副作用: 删除 active.md），成功后从事前快照还原。
+    preserve_persona = not has_persona_flag(passthrough)
+    persona_tmp = snapshot_persona(target) if preserve_persona else None
+    if preserve_persona:
+        passthrough.append("--no-persona")
+
+    sys.argv = [str(KIT / "cli" / "init"), str(target)] + passthrough
+    print(f"→ 重建 {kit_dst}（源: {KIT}）")
+    try:
+        init_mod.main()
+    except SystemExit as e:
+        code = e.code if isinstance(e.code, int) else 1
+        print(f"✗ init 退出（code={code}），自动回滚备份")
+        _rollback(kit_dst, bak)
+        _cleanup_persona_tmp(persona_tmp)
+        sys.exit(code or 1)
+    except Exception as e:                                # 半成品不留现场
+        print(f"✗ init 异常: {e}，自动回滚备份")
+        _rollback(kit_dst, bak)
+        _cleanup_persona_tmp(persona_tmp)
+        sys.exit(1)
+
+    if preserve_persona:
+        if persona_tmp:
+            restore_persona(persona_tmp, target)
+        else:
+            print("· 项目本来没有激活人格（零加载，维持原状）")
+    report_changes(old, snapshot(kit_dst))
+    print()
+    print(f"✓ kit/ 重建完成。确认无误后删除备份: rm -rf {bak.name}")
+    print("  （init 失败过一次? 直接重跑 re-init 即可续传补齐，no-clobber 不伤已装好的部分）")
+
+
+def snapshot_persona(target):
+    """人格保真第 1 步: 把项目 personas/active.md 快照到临时文件。
+
+    注意: kit.bak-* 备份只含 kit/，而 active.md 在项目根、不在其中，
+    必须单独快照。init 的任何人格分支都会改写它
+    （继承源=覆盖 / --no-persona=删除，见 init.apply_persona）。
+    返回临时文件路径；项目本来就没人格则返回 None（零加载）。
+    """
+    active = target / "personas" / "active.md"
+    if not (active.exists() or active.is_symlink()):
+        return None
+    fd, tmp = tempfile.mkstemp(prefix="aios-persona-", suffix=".md")
+    os.close(fd)
+    shutil.copy2(active, tmp)           # 默认跟随 symlink，还原为普通文件
+    return tmp
+
+
+def restore_persona(tmp, target):
+    """人格保真第 2 步: init 成功后把 active.md 快照放回原位。"""
+    dst = target / "personas" / "active.md"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.exists() or dst.is_symlink():
+        dst.unlink()
+    shutil.move(tmp, dst)
+    print("✓ 人格保真: personas/active.md 已保留")
+
+
+def _cleanup_persona_tmp(tmp):
+    """失败路径清理人格快照（失败即回滚到旧状态，快照不再需要）。"""
+    if tmp:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def _rollback(kit_dst, bak):
+    """init 失败 → 删半成品 kit/，把备份移回原位。"""
+    try:
+        if kit_dst.exists():
+            shutil.rmtree(kit_dst)
+        shutil.move(str(bak), str(kit_dst))
+        print(f"  ✓ 已回滚: {bak.name} → kit/")
+    except OSError as e:
+        print(f"  ✗ 自动回滚失败: {e}；请手动执行: rm -rf {kit_dst} && mv {bak} {kit_dst}")
+
+
+if __name__ == "__main__":
+    main()

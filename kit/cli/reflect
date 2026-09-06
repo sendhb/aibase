@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# ====================================================================
+# 本脚本是 Python 3。请勿用 bash/sh 直接调用（如 `bash kit/cli/reflect`）：
+# bash 会把 Python 源码当 shell 逐行解析，产生巨量错误输出（同 TASK-031
+# 根因防护，见 kit/cli/task 头注释）。
+# 正确调用：./kit/cli/reflect <TASK-ID>  或  python3 kit/cli/reflect <TASK-ID>
+# ====================================================================
+"echo" "✗ 本脚本是 Python 3，请勿用 bash/sh 调用（bash 会把 Python 源码当 shell 逐行解析）。正确用法: ./kit/cli/reflect <TASK-ID> 或 python3 kit/cli/reflect <TASK-ID>"
+"exit" "1"
+"""reflect — Reflect 机械化薄入口（TASK-096，核心在 lib/reflect_check.py）
+
+用法:
+  reflect <TASK-ID> [--base REF] [--head REF] [--root DIR]
+
+机械扫描 git diff（默认 HEAD~1..HEAD）：
+  - 新增行命中技术债标记 TODO/FIXME/HACK/XXX（逐文件逐行号）；
+  - 改动文件 ∉ source_dirs 或 ∈ generated_dirs → 越界告警（指明目录属性）。
+输出 markdown REFLECT 记录段（可直接贴 TASK 备注）；无发现输出严格为"无"。
+
+产出是**建议**：本命令恒以 0 退出、不拦截状态流转——机械否决权只在
+`cli/task verify`（build/lint/test/check）与治理闸门（P0/rework）。
+判断性自省（架构违规/测试覆盖/规格对齐）仍由模型完成（engine.md §4）。
+"""
+import argparse
+import os
+import subprocess
+import sys
+
+_LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                    "cli", "lib")
+if _LIB not in sys.path:
+    sys.path.insert(0, _LIB)
+
+import reflect_check  # noqa: E402
+import tasklib  # noqa: E402
+
+USAGE = __doc__
+
+
+def git_diff(root, base, head):
+    """返回 (diff 文本, 错误消息)。只读操作，失败时错误消息非空。"""
+    cmd = ["git", "-C", root, "diff", "--no-color", "-U0", base, head]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+    except OSError as e:
+        return None, "无法执行 git: %s" % e
+    if proc.returncode != 0:
+        return None, "git diff 失败（exit %d）: %s" % (proc.returncode,
+                                                       proc.stderr.strip() or "未知错误")
+    return proc.stdout, None
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="reflect", description=USAGE,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("task_ref", help="任务 ID，如 TASK-096（用于 REFLECT 记录标注）")
+    parser.add_argument("--base", default="HEAD~1", help="diff 基线（默认 HEAD~1）")
+    parser.add_argument("--head", default="HEAD", help="diff 目标（默认 HEAD）")
+    parser.add_argument("--root", default=None,
+                        help="项目根（默认向上探测 aios.config.yaml）")
+    args = parser.parse_args(argv)
+
+    root = args.root or tasklib.find_project_root(os.path.abspath(__file__))
+
+    # 目录属性来自 aios.config.yaml（source_dirs/generated_dirs）
+    try:
+        import config as configlib
+        cfg = configlib.load_config(root)
+    except Exception as e:  # ConfigError / OSError —— 呈现为使用错误，非崩溃
+        print("✗ 读取 aios.config.yaml 失败: %s" % e, file=sys.stderr)
+        return 2
+
+    diff_text, err = git_diff(root, args.base, args.head)
+    if err is not None:
+        print("✗ %s" % err, file=sys.stderr)
+        return 2
+
+    findings = reflect_check.scan(diff_text, cfg.get("source_dirs"),
+                                  cfg.get("generated_dirs"))
+    print(reflect_check.render(findings, args.task_ref, args.base, args.head))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

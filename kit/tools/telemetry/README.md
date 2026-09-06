@@ -1,4 +1,4 @@
-# tools/agent
+# tools/telemetry
 
 > 见 [tools/README.md](../README.md)
 
@@ -78,7 +78,7 @@ Wants=network-online.target
 Type=simple
 User=myuser
 WorkingDirectory=/srv/my-project
-ExecStart=/usr/bin/python3 /srv/my-project/kit/tools/agent/agent.py --config /etc/aios/agent.json
+ExecStart=/usr/bin/python3 /srv/my-project/kit/tools/telemetry/agent.py --config /etc/aios/agent.json
 Restart=on-failure
 RestartSec=10
 
@@ -102,7 +102,7 @@ journalctl -u aios-agent -f         # 查看日志
 Description=AIOS telemetry agent (once)
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/python3 /srv/my-project/kit/tools/agent/agent.py --once --config /etc/aios/agent.json
+ExecStart=/usr/bin/python3 /srv/my-project/kit/tools/telemetry/agent.py --once --config /etc/aios/agent.json
 [Timer]
 OnBootSec=1min
 OnUnitActiveSec=5min
@@ -114,7 +114,7 @@ WantedBy=timers.target
 
 ```bash
 cd /srv/my-project
-nohup python3 kit/tools/agent/agent.py --config /etc/aios/agent.json \
+nohup python3 kit/tools/telemetry/agent.py --config /etc/aios/agent.json \
   >> /var/log/aios-agent.log 2>&1 &
 echo $! > /var/run/aios-agent.pid
 kill "$(cat /var/run/aios-agent.pid)"   # SIGTERM 干净退出
@@ -125,14 +125,14 @@ kill "$(cat /var/run/aios-agent.pid)"   # SIGTERM 干净退出
 ### Windows Task Scheduler
 
 任务计划程序 GUI：创建任务 → 触发器（登录/启动/按间隔）→ 操作 → 启动程序 →
-`python.exe` + 参数 `C:\srv\my-project\kit\tools\agent\agent.py --config C:\etc\agent.json`。
+`python.exe` + 参数 `C:\srv\my-project\kit\tools\telemetry\agent.py --config C:\etc\agent.json`。
 
 等价 schtasks 命令（开机启动常驻；建议 `python.exe` 用绝对路径，SYSTEM 账户
 PATH 可能与交互用户不同）：
 
 ```bat
 schtasks /Create /TN "AIOS Agent" /SC ONSTART /RU SYSTEM ^
-  /TR "\"C:\Python312\python.exe\" C:\srv\my-project\kit\tools\agent\agent.py --config C:\etc\agent.json"
+  /TR "\"C:\Python312\python.exe\" C:\srv\my-project\kit\tools\telemetry\agent.py --config C:\etc\agent.json"
 ```
 
 按间隔定时单轮（等价 systemd timer）：`/SC MINUTE /MO 5` + 参数加 `--once`。
@@ -233,6 +233,74 @@ payload 可选携带事件增量（**启用后新增顶层键，快照字段不�
 - 人为删除/重建 `task-events.jsonl` 会使 seq 重新从 1 开始，与旧流冲突时服务端去重可能丢事件；此时需人工删除 `.push-cursor` 并确认服务端重建（异常运维操作）。
 - 事件文件 append-only 且**无自动归档/压实**：长期运行文件线性增长，agent 每轮全量读取（O(n)）。后续任务可在确认（cursor 已过）后对旧记录截断/归档。
 - 单批 ≤ 200 条由游标联动保证不丢（`_incremental_events` 先截批再推游标）：积压尾部分批推送，不静默丢事件。
+
+### session 日志流（TASK-104，outbox 语义 + 消息级增量）
+
+> 目标：把 TASK-103 落盘的 pi 会话 transcript（`runtime/logs/sessions/<TASK-ID>/*.jsonl`，
+> 含 message/toolCall/toolResult/thinking）增量搬到 aimonitor Web 端实时查看。
+> 粒度 = **消息级**（与本地 `tail -f` 一致），非 token 级（TASK-103 已否决的 B 方案，体积 O(n²)）。
+> 服务端消费（ingest 扩展/存储/查看页）由 aimonitor 仓镜像卡 TASK-073 承接。
+
+启用条件：项目存在 `runtime/logs/sessions/<TASK-ID>/*.jsonl`（TASK-103 自动落盘即启用，无需配置）。
+
+payload 可选携带 session 增量（**启用后新增顶层键 `sessions`，快照/事件字段不变，向后兼容**）：
+
+```json
+{
+  "project_id": "proj-1",
+  "ts": 1786892400.0,
+  "sessions": {
+    "items": [
+      {"task_id": "TASK-104",
+       "files": [
+         {"name": "20260905T101112_<uuid>.jsonl",
+          "lines": ["{\"type\":\"message\",\"role\":\"assistant\",...}"]}
+       ]}
+    ],
+    "truncated": false,
+    "cursor": {"TASK-104/20260905T101112_<uuid>.jsonl": 45678}
+  },
+  "files": { "...": "同 v1.0 快照" }
+}
+```
+
+**payload 字段契约（契约版本 v1.1；v1.0 语义不变）**：
+
+| 字段 | 类型 | 语义 |
+|------|------|------|
+| `sessions` | `object \| 缺失` | 缺失 = sessions 目录缺失/无 jsonl（未启用）；存在 = 已启用 |
+| `sessions.items[]` | `array` | 按 task 分组的增量：`{task_id, files: [{name, lines}]}`；`lines` 为**原始 jsonl 行文本**（服务端自行解析，损坏行由服务端按宽松策略跳过——agent 不解析不丢内容） |
+| `sessions.truncated` | `bool` | true = 本轮有未送达的剩余积压（体积预算截批），下轮续推 |
+| `sessions.cursor` | `object` | `{"<TASK-ID>/<文件名>": 字节偏移}`——本轮**确认覆盖**到各文件的字节偏移（只反映实际装入行，不虚报） |
+| `items=[]` + `truncated=false` | — | 已启用但本轮无新增（追平确认，类比事件流空批） |
+
+**游标语义（outbox，与事件流同构）**：
+- 本地游标持久化在 `runtime/logs/.session-push-cursor`（`{"offsets": {...}}`，gitignored）：
+  **推送成功后才整体覆盖写**；失败不推进（下轮重推）。
+- 游标按**字节偏移**推进，且只停在完整行行末：半行（pi 正在写入）不纳入，下轮续读。
+- 文件比游标小（截断/重建）→ 从 0 全量重读（宁重推，不静默丢；重复内容由服务端按行内容去重，TASK-073 承接）。
+- 推送成功但**无新增**时 payload 携带 `sessions.items=[]` + 当前 cursor（追平心跳确认）。
+
+**体积护栏（防心跳饿死）**：
+- 单批 session 增量 ≤ `MAX_SESSION_BYTES`（默认 200 KiB，必须 < 整体 `MAX_PAYLOAD_BYTES`=256 KiB）。
+- 单行 > `MAX_SESSION_LINE_BYTES`（默认 64 KiB）→ 行内截断加 `…[truncated]` 后缀照常计入
+  （完整原文仍在本地 session jsonl，TASK-103 本地回放是真相源），保证积压逐轮推进、无永久堵批。
+- 每轮先序列化快照+事件测占用，剩余预算给 session；预算不足（< `MIN_SESSION_BUDGET`=1 KiB）时本轮
+  只发快照/事件（session 让位，心跳不饿死，游标不动）。
+- 行成本按 **JSON 转义后字节数**计（防转义膨胀低估）；估算偏差兑底：整体超限时退回纯快照/事件推送。
+
+**组件职责**：TASK-103 落盘 session jsonl → `agent_runtime.read_session_deltas/
+read_session_push_cursor/write_session_push_cursor` 读写 → `agent_loop._incremental_sessions`
+预算截批 + 游标推进 → aimonitor ingest/查看页（**TASK-073 镜像卡，两卡互引**）。
+
+**服务端兼容性**：aimonitor `validate_ingest_payload` 宽松语义忽略未知顶层键——
+新 agent（带 `sessions`）推旧 server 仍 200（session 数据暂被忽略，不报错）；
+旧 agent（无 `sessions`）推新 server 由 TASK-071 既有回归保证（TASK-073 承接验收）。
+
+**已知限制**：
+- 长期 backlog 单轮全量读入内存（O(文件增量大小)）；MB 级可接受，GB 级需先做本地归档。
+- 文件重建/截断触发全量重推可能产生服务端重复行，去重策略归 TASK-073（按行内容哈希或 (project, task, file, offset) 键）。
+- session jsonl 由 pi 原生写入，行 schema（message/toolCall 等）由服务端解析；agent 层不做格式假设。
 
 ### 状态码（ingest 返回）
 

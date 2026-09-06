@@ -7,7 +7,7 @@ TASK-069：Phase 3 调度器骨架的状态收集组件（只读，绝无写操�
   （open/in-progress/in-review/blocked/done/cancelled）计数 + 最近事件。
 - 远端 agent 传输条目（TASK-037 起）：经 aimonitor /api/status 聚合读状态
   （不再无脑跳过）；未配 fetcher（旧行为）或 aimonitor 不可达时仍标 skipped。
-- 复用 `kit/tools/agent/agent_runtime.py` 的只读接口
+- 复用 `kit/tools/telemetry/agent_runtime.py` 的只读接口
   （read_project_runtime / read_task_events），不修改它。
 
 容错约定（与 agent_runtime 一致）：
@@ -22,14 +22,15 @@ import sys
 import urllib.error
 import urllib.request
 
-# 复用 agent_runtime 的只读层（同目录层级：kit/tools/dispatcher/ → ../agent/）
+# 复用 agent_runtime 的只读层（同目录层级：kit/tools/dispatcher/ → ../telemetry/）
 AGENT_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", "agent"
+    os.path.dirname(os.path.abspath(__file__)), "..", "telemetry"
 )
 if AGENT_DIR not in sys.path:
     sys.path.insert(0, AGENT_DIR)
 import agent_runtime  # noqa: E402
 
+from agent_adapter import aimonitor_base_url  # noqa: E402,F401  # TASK-083 URL 归一化
 from registry import is_agent, is_local  # noqa: E402
 
 STATUSES = ("open", "in-progress", "in-review", "blocked", "done", "cancelled")
@@ -76,7 +77,7 @@ def fetch_aimonitor_counts(server_url, project_id, http_fn=None):
     """
     if not server_url or not project_id:
         return None
-    url = server_url.rstrip("/") + "/api/status"
+    url = aimonitor_base_url(server_url) + "/api/status"
     try:
         if http_fn is not None:
             data = http_fn(url)
@@ -107,7 +108,7 @@ def snapshot_from_aimonitor(server_url, entry, http_fn=None):
     """
     if not server_url or not entry:
         return None
-    url = server_url.rstrip("/") + "/api/status"
+    url = aimonitor_base_url(server_url) + "/api/status"
     try:
         if http_fn is not None:
             data = http_fn(url)

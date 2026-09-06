@@ -7,7 +7,7 @@
 > 依据（唯一真相）：
 > - `aimonitor/docs/MONITOR-SPEC.md` §3.1（Agent 推送模式契约）+ §3.2（注册流程）
 > - `aimonitor/docs/OPERATIONS.md`（运维手册）
-> - `aibase/kit/tools/agent/README.md`（agent 组件说明，含注册章节）
+> - `aibase/kit/tools/telemetry/README.md`（agent 组件说明，含注册章节）
 > - 本手册与实现行为逐项核对（2026-08-21；agent 注册链路 TASK-042~044、分级治理 TASK-047 已落地）。
 
 ---
@@ -202,7 +202,7 @@ bash kit/cli/protect
 ```
 
 生成结构（kit 布局）：`kit/`（框架只读）+ `knowledge/ docs/ runtime/` + `aios.config.yaml` + `AGENTS.md`。
-`kit/tools/agent/` 已随项目分发（零额外安装）。
+`kit/tools/telemetry/` 已随项目分发（零额外安装）。
 
 ### 3.2 产生可监控数据（任务 + AI 执行活动）
 
@@ -316,7 +316,7 @@ python kit\cli\task start TASK-001
 
 **方式 B：注册流程（服务端已支持；agent CLI 提交待接通）**
 
-agent 自 v0.2 起支持**自助注册**（详见 `kit/tools/agent/README.md` 注册章节）：
+agent 自 v0.2 起支持**自助注册**（详见 `kit/tools/telemetry/README.md` 注册章节）：
 
 ```
 state=unregistered → 提交注册申请（POST /api/register）→ state=pending
@@ -330,10 +330,10 @@ state=unregistered → 提交注册申请（POST /api/register）→ state=pendi
 
 ```powershell
 # 放好配置后校验（exit 0 = 配置合法）
-python C:\srv\win-app\kit\tools\agent\agent.py --check-config --config C:\etc\agent.json
+python C:\srv\win-app\kit\tools\telemetry\agent.py --check-config --config C:\etc\agent.json
 
 # 单轮试推（产生一次推送；成功应无 401/网络错误输出）
-python C:\srv\win-app\kit\tools\agent\agent.py --once --config C:\etc\agent.json
+python C:\srv\win-app\kit\tools\telemetry\agent.py --once --config C:\etc\agent.json
 ```
 
 ### 4.5 部署常驻 agent（Windows Task Scheduler）
@@ -341,11 +341,11 @@ python C:\srv\win-app\kit\tools\agent\agent.py --once --config C:\etc\agent.json
 ```powershell
 # 开机自启常驻（SYSTEM 账户；python.exe 用绝对路径）
 schtasks /Create /TN "AIOS Agent" /SC ONSTART /RU SYSTEM ^
-  /TR "\"C:\Python312\python.exe\" C:\srv\win-app\kit\tools\agent\agent.py --config C:\etc\agent.json"
+  /TR "\"C:\Python312\python.exe\" C:\srv\win-app\kit\tools\telemetry\agent.py --config C:\etc\agent.json"
 
 # 或按间隔定时单轮（等价 systemd timer）：
 schtasks /Create /TN "AIOS Agent" /SC MINUTE /MO 5 /RU SYSTEM ^
-  /TR "\"C:\Python312\python.exe\" C:\srv\win-app\kit\tools\agent\agent.py --once --config C:\etc\agent.json"
+  /TR "\"C:\Python312\python.exe\" C:\srv\win-app\kit\tools\telemetry\agent.py --once --config C:\etc\agent.json"
 
 # 立即启动 / 查询 / 停止
 schtasks /Run /TN "AIOS Agent"
@@ -396,7 +396,7 @@ schtasks /End /TN "AIOS Agent"
 > 一键脚本（逐项目生成配置/校验/试推/建任务，零 token 入库）：
 >
 > ```powershell
-> powershell -ExecutionPolicy Bypass -File <aibase>/kit/tools/agent/deploy-remote-project.ps1 `
+> powershell -ExecutionPolicy Bypass -File <aibase>/kit/tools/telemetry/deploy-remote-project.ps1 `
 >   -KitDir "<aibase>/kit" -ProjectsJson "<aimonitor>/config/projects.json" `
 >   -AgentsJson "<aimonitor>/config/agents.json" `
 >   -ServerUrl "http://<监控端>/api/ingest"      # 如 http://47.109.205.200:3113/api/ingest
@@ -422,7 +422,7 @@ python3 <aibase>/kit/tools/dispatcher/dispatcher.py list \
 |---|--------|------------|------|
 | 1 | 服务端在线 | `curl -s http://localhost:3113/api/status` | 200，`projects` 数组含 3 个项目（按 `id` 过滤） |
 | 2 | Linux 项目 local 采集 | status 中 `linux01:backend-api` 条目 | tasks 非空，error 为 null |
-| 3 | agent 配置合法 | `python kit/tools/agent/agent.py --check-config --config C:\etc\agent.json` | exit 0 |
+| 3 | agent 配置合法 | `python kit/tools/telemetry/agent.py --check-config --config C:\etc\agent.json` | exit 0 |
 | 4 | agent 单轮推送 | `... --once --config C:\etc\agent.json` | 无 401/网络错误 |
 | 5 | Windows 项目 agent 采集 | status 中 `win01:win-app` 条目 | 无 `"agent 离线"`，tasks 与 Linux 同结构（`transport: "agent"`） |
 | 6 | 前端仪表盘 | 浏览器 `http://192.168.1.10:3113/` | 三项目可见、心跳存活 |
@@ -602,7 +602,7 @@ python kit/cli/task new "描述" --priority P1
 python kit/cli/autoloop both
 
 # ── agent（Windows PowerShell）──
-python kit\tools\agent\agent.py --check-config --config C:\etc\agent.json
-python kit\tools\agent\agent.py --once --config C:\etc\agent.json
+python kit\tools\telemetry\agent.py --check-config --config C:\etc\agent.json
+python kit\tools\telemetry\agent.py --once --config C:\etc\agent.json
 schtasks /Run /TN "AIOS Agent"
 ```

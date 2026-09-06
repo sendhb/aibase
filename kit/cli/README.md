@@ -9,7 +9,8 @@
 | `mkproject` | 用 kit/ 布局创建新项目；支持 `--profile`、`--persona <name>`（从人格库激活）、`--no-persona`（零加载）、`--from <kit-root>` | `cli/mkproject` |
 | `persona` | 人格切换（按需加载）：`list` / `use <name>` / `off` / `show` | `cli/persona`（Python 3） |
 | `init` | 安装模板到目标项目（Python 跨平台：Windows 可 `python cli/init`；`--install-deps` 自动按平台装 git/python） | `cli/init` |
-| `task` | 任务生命周期管理 | `cli/task`（Python 3，用 `./cli/task` 调用，勿用 `bash cli/task`） |
+| `re-init` | 重建目标 `kit/`（框架升级路径：备份旧版 → 删除 → 用新版重装；只动 `kit/`，人格保真，init 失败自动回滚，报告 新增/删除/更新 对账） | `cli/re-init`（Python 3；第一个参数为目标，其余选项原样透传给 init） |
+| `task` | 任务生命周期管理（`block` 原因必填，缺失则非零退出） | `cli/task`（Python 3，用 `./cli/task` 调用，勿用 `bash cli/task`） |
 | `task verify` | 真实执行 `aios.config.yaml` 的 build/lint/test/check，通过才生成 VERIFY 记录（不是自证） | `cli/task verify TASK-xxx` |
 
 > **调用注意**：`cli/task` 是 Python 3 脚本，请用 `./cli/task <子命令>` 或 `python3 cli/task <子命令>`；
@@ -30,13 +31,32 @@
 
 - `runtime/logs/autoloop-{coder,reviewer}.heartbeat` — 每轮循环开始时间戳，判断循环是否还活着
 - `runtime/logs/autoloop-{coder,reviewer}-events.jsonl` — 每轮一行 JSON `{ts, task, outcome}`，outcome ∈ `no_task/blocked_p0/ok/error/timeout`
+- `runtime/logs/tasks/<TASK-ID>.log` — LLM 会话输出按 task 落盘（TASK-100）：路径是 task ID 的纯函数，单文件追加 + 轮次头 `=== [ISO时间] <role> round N | provider <p> | PID <pid> ===`（rework/reviewer 多轮共存一个文件保任务完整一生，`tail -f` 实时可看）；`task verify` 输出经 prompt 指示 tee 进同一文件。循环层行仍在 `autoloop-{coder,reviewer}-<date>.log`（广度）与 per-task log（纵深）互补
+- `runtime/logs/sessions/<TASK-ID>/` — pi 会话全量 transcript（TASK-103）：pi `--session-dir` 自建 `<时间戳>_<UUID>.jsonl`（消息/tool call/thinking/usage），与 per-task log（人读摘要，`-p` 模式只有最终回复）互补；`pi --export <file>` 回放 HTML。仅 pi 生效；no_task 空转轮与非 pi provider 不落 session；目录创建失败降级 `--no-session` 不阻塞会话
+- `runtime/locks/autoloop-llm.pid` — 当前 LLM 子进程记录（`{pid, llm, task, ts}`；daemon 退出收编与 status 孤儿检测的数据源）
+- `runtime/locks/task-events.lock` — task-events.jsonl 追加/任务编号分配的跨进程锁（并发 `task new` 防 seq 撞号）
 
 用法：
 
 ```bash
 python kit/cli/autoloop coder    --interval 300 --unattended --id coder-1
 python kit/cli/autoloop reviewer --interval 300 --unattended --id reviewer-1
+python kit/cli/autoloop status   --interval 300   # 单屏聚合：壳死活/LLM 子进程/in-progress/最近事件
 ```
+
+> **status（TASK-099）**：单屏回答三个问题 —— 循环壳死活（PID + heartbeat 年龄）、
+> 哪个 task 有 LLM 在跑（PID 记录 + ps 扫描孤儿，无记录的存活进程标记为「孤儿」交人工决策）、
+> in-progress 任务清单与最近事件。daemon（both）正常退出（SIGTERM/stop）时会收编
+> 记录中的 LLM 子进程；`kill -9` 残留的孤儿由 status 暴露，人工决策兑底。
+
+> **per-task log（TASK-100）**：任务执行中实时观察走
+> `tail -f runtime/logs/tasks/<TASK-ID>.log`（路径由 task ID 直接推导，
+> `autoloop_coder.task_log_path(task_id)` 为纯函数）；no_task 空转轮不产生
+> task log（仍走 both.log/daily）。events/heartbeat/both.log 保留不替代——
+> per-task log 管单任务纵深，它们管循环整体广度，判活仍靠 heartbeat。
+> 会话全过程回放（TASK-103）：`runtime/logs/sessions/<TASK-ID>/`（
+> `autoloop_coder.task_session_dir(task_id)` 为纯函数）落 pi 原生全量
+> transcript，per-task log 管人读摘要、session 管全量回放，二者互补。
 
 > 兼容 shim（TASK-026）：`python kit/cli/autoloop-coder ...` / `python
 > kit/cli/autoloop-reviewer ...` 等价于上面的 `autoloop coder\|reviewer ...`。
