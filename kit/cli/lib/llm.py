@@ -30,7 +30,35 @@ from events import emit_event  # 兄弟模块（events.py，TASK-022）；无循
 
 EXIT_NOT_FOUND = 127  # 与 shell 约定一致：可执行文件不存在（旧 Bash `exec pi` → 127）
 TIMEOUT_EXIT = 124  # 与 GNU `timeout` CLI 退出码约定一致（超时被 kill）
+FATAL_EXIT = 86  # provider 不可恢复错误快速失败退出码（≠124/127；事件层按 error 记，TASK-107）
 PROVIDERS = ("claude", "deepseek", "pi")
+
+# 不可重试错误特征（小写子串匹配，TASK-107）：网关拒绝/欠费/账号隔离类错误重试
+# 无意义，只会拖满 timeout 把整个 autoloop 循环拖死。刻意保守：只收网关错误码与
+# HTTP 401/403 的显式形态，避免误杀正常会话输出（如任务正文恰好含 401 字样）。
+FATAL_PATTERNS = (
+    "gateway_error", "403004", "in arrears", "欠费",
+    "http 401", "http 403", "http/1.0 401", "http/1.0 403",
+    "http/1.1 401", "http/1.1 403", "http/2 401", "http/2 403",
+    "401 unauthorized", "403 forbidden",
+    "status code 401", "status code 403",
+    "status_code: 401", "status_code: 403",
+)
+
+
+def scan_fatal_output(text):
+    """provider 输出文本 → 命中的不可重试错误特征（小写子串）；无 → None。
+
+    纯函数（单测锚点）；大小写不敏感。只匹配 FATAL_PATTERNS，宁可漏判
+    （退化为原 timeout 行为）不可误杀正常会话。
+    """
+    if not text:
+        return None
+    low = text.lower()
+    for pat in FATAL_PATTERNS:
+        if pat in low:
+            return pat
+    return None
 
 
 def _provider_argv(provider, prompt, unattended=False, session_dir=None):

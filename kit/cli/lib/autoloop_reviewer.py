@@ -130,10 +130,17 @@ def run_llm_reviewer(provider, prompt, *, log_dir, task, timeout=None,
                                        session_dir=session_dir)
     out, on_start = _open_task_log(log_dir, task, role=NAME, provider=provider,
                                    fallback_log=log_file)
+    # fatal 快速失败扫描路径（TASK-107，与 coder 同款）：**只扫本轮新增字节**
+    # （fatal_scan_start = 打开句柄时的文件末尾偏移）——共享 log 的历史字节
+    # （mock 测试文本、LLM 应答任务正文）含 fatal 特征词，不可参与本轮判定
+    # （2026-09-06 TASK-107 自卡事故）；无落盘 → 不扫描（宁可漏判）。
+    scan_path = out.name if out is not None else None
+    scan_start = out.tell() if out is not None else None
     try:
         rc = _run_argv(argv, env, timeout=timeout, stdout=out,
                        stderr=subprocess.STDOUT, root=root,
-                       llm_name=provider, task_id=task, on_start=on_start)
+                       llm_name=provider, task_id=task, on_start=on_start,
+                       fatal_scan_path=scan_path, fatal_scan_start=scan_start)
     finally:
         if out is not None:
             out.close()

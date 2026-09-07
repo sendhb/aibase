@@ -161,8 +161,9 @@ def _resolve_provider_argv(provider, prompt, unattended=False, session_dir=None)
 
 
 def _run_argv(argv, env, timeout=None, stdout=None, stderr=None,
-              root=None, llm_name=None, task_id=None, on_start=None):
-    """运行自定义 argv，返回退出码（0/124/127/其它）。等价 llm.run_llm 的 Popen 语义。
+              root=None, llm_name=None, task_id=None, on_start=None,
+              fatal_scan_path=None, fatal_scan_start=None):
+    """运行自定义 argv，返回退出码（0/124/127/86/其它）。等价 llm.run_llm 的 Popen 语义。
 
     超时杀子进程返回 124；可执行文件缺失返回 127（与旧 Bash `exec` 一致）。
     root 非空时记录/清除 LLM 子进程 PID（TASK-099 孤儿收编；coder/reviewer
@@ -170,6 +171,16 @@ def _run_argv(argv, env, timeout=None, stdout=None, stderr=None,
     on_start 非空时在 Popen 成功后立即以子进程 PID 回调（TASK-100 per-task log
     轮次头回填 PID；先于子进程首字节输出，不改启动方式/退出码契约），异常吞掉
     不影响会话。
+    fatal_scan_path 非空时边跑边扫输出尾部（每 FATAL_POLL_INTERVAL 秒，
+    TASK-107）：命中 llm.FATAL_PATTERNS（网关欠费/401/403 等不可恢复错误）→
+    kill 子进程立即返回 llm.FATAL_EXIT，不再拖满 timeout；None 时保留原
+    单次 wait 语义（timeout 行为逐字节不变）。timeout 语义不变：分片轮询
+    总时限仍为 timeout（monotonic 死线）。
+    fatal_scan_start 非空时只扫该偏移之后的新增字节（2026-09-06 事故修复）：
+    per-task log 是跨轮累积的共享文件，历史轮的测试 mock 文本/LLM 对任务
+    正文的应答都可能含 fatal 特征词，全文件尾部扫描会拿旧字节误杀本轮
+    会话（TASK-107 被自家卷宗里 mock 的 "HTTP 401" 卡死实录）。None → 0
+    （整文件，兼容旧行为/空文件场景）。
     """
     try:
         proc = subprocess.Popen(argv, stdout=stdout, stderr=stderr, env=env)
@@ -185,10 +196,32 @@ def _run_argv(argv, env, timeout=None, stdout=None, stderr=None,
         except Exception:  # noqa: BLE001 — 轮次头失败绝不影响 LLM 会话
             pass
     try:
-        rc = proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        llm._kill(proc)
-        rc = llm.TIMEOUT_EXIT
+        if fatal_scan_path:
+            deadline = (time.monotonic() + timeout) if timeout is not None else None
+            while True:
+                try:
+                    rc = proc.wait(timeout=FATAL_POLL_INTERVAL)
+                    break
+                except subprocess.TimeoutExpired:
+                    hit = llm.scan_fatal_output(
+                        _tail_text_from(fatal_scan_path, FATAL_SCAN_BYTES,
+                                        fatal_scan_start or 0))
+                    if hit:
+                        print("✗ provider 不可恢复错误，本轮终止: %s（%s）"
+                              % (hit, argv[0]), file=sys.stderr)
+                        llm._kill(proc)
+                        rc = llm.FATAL_EXIT
+                        break
+                    if deadline is not None and time.monotonic() >= deadline:
+                        llm._kill(proc)
+                        rc = llm.TIMEOUT_EXIT
+                        break
+        else:
+            try:
+                rc = proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                llm._kill(proc)
+                rc = llm.TIMEOUT_EXIT
     finally:
         if root is not None:
             launcher.clear_llm_pid(root, pid=proc.pid)
@@ -196,6 +229,42 @@ def _run_argv(argv, env, timeout=None, stdout=None, stderr=None,
 
 
 # ---------------- per-task 会话日志（TASK-100） ----------------
+
+FATAL_POLL_INTERVAL = 2.0  # fatal 扫描轮询周期（秒，TASK-107）
+FATAL_SCAN_BYTES = 8192    # 每次扫描只看输出尾部（错误特征出现在末尾；控成本）
+
+
+def _tail_text(path, nbytes):
+    """读文件末尾 ≤nbytes 字节并解码（utf-8 replace）；缺失/不可读 → ""（TASK-107）。
+
+    供 _run_argv 边跑边扫 provider 输出尾部；边界可能截断多字节字符，
+    errors=replace 兜底。注意：这是**全文件**尾部——只对「本轮专属输出
+    文件」安全；跨轮累积的共享 log 请用 _tail_text_from 限定起始偏移。
+    """
+    return _tail_text_from(path, nbytes, 0)
+
+
+def _tail_text_from(path, nbytes, start_offset):
+    """读文件 [start_offset, EOF) 区间的末尾 ≤nbytes 字节并解码（TASK-107）。
+
+    2026-09-06 事故修复：per-task log/fallback log 跨轮累积，历史字节
+    （测试 mock 的 "HTTP 401"、LLM 应答任务正文提到的 "欠费" 等）会被
+    全文件尾部扫描误判为本轮 provider 错误 → 会话 2 秒即遭自杀。本函数
+    只看本轮起始偏移之后的新增字节（末尾 ≤nbytes），旧字节一律不扫描。
+    start_offset ≥ 当前文件大小 → ""（本轮尚无输出）。缺失/不可读 → ""。
+    """
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            lo = max(start_offset, size - nbytes)
+            if lo >= size:
+                return ""
+            f.seek(lo)
+            return f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
 
 def task_log_path(task_id):
     """task ID → per-task log 相对路径（纯函数，监控/agent/人类均可推导）。
@@ -301,10 +370,19 @@ def run_llm_coder(provider, prompt, *, log_dir, task, timeout=None,
                                        session_dir=session_dir)
     out, on_start = _open_task_log(log_dir, task, role=NAME, provider=provider,
                                    fallback_log=log_file)
+    # fatal 快速失败扫描路径（TASK-107）：会话输出落盘处（per-task log 或
+    # no_task 空转轮的 fallback log），**只扫本轮新增字节**（fatal_scan_start
+    # = 打开句柄时的文件末尾偏移）：共享 log 的历史字节（测试 mock 文本、
+    # LLM 应答任务正文等）含 fatal 特征词，不可参与本轮判定（2026-09-06
+    # TASK-107 自卡事故）。无落盘（out None，会话输出不经本进程重定向）→
+    # 无从界定本轮字节 → 不扫描（宁可漏判）。
+    scan_path = out.name if out is not None else None
+    scan_start = out.tell() if out is not None else None
     try:
         rc = _run_argv(argv, env, timeout=timeout, stdout=out,
                        stderr=subprocess.STDOUT, root=root,
-                       llm_name=provider, task_id=task, on_start=on_start)
+                       llm_name=provider, task_id=task, on_start=on_start,
+                       fatal_scan_path=scan_path, fatal_scan_start=scan_start)
     finally:
         if out is not None:
             out.close()

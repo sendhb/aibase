@@ -44,6 +44,7 @@ import time
 
 import lock  # noqa: E402  跨平台进程文件锁（TASK-012）
 import tasklib  # noqa: E402  项目根定位（TASK-021）
+import llm  # noqa: E402  LLM 退出码常量（TASK-107 P1-1 循环层快速失败；无循环依赖）
 
 LAUNCHER_NAME = "autoloop"
 DEFAULT_BOTH_INTERVAL = 30  # both 常驻默认轮询间隔（秒），AUTOLOOP_DEFAULT_INTERVAL 可覆盖
@@ -64,6 +65,9 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 LAUNCHER_DIR = os.path.dirname(os.path.abspath(__file__))
+# 薄入口绝对路径（kit/cli/autoloop）：spawn_background 重新进入启动器用它；
+# task review 唤醒（P0-2）跨模块调用 cmd_ensure 时也传它，避免依赖 sys.argv[0]。
+LAUNCHER_SCRIPT = os.path.join(os.path.dirname(LAUNCHER_DIR), LAUNCHER_NAME)
 
 
 def log(msg, err=False):
@@ -96,15 +100,16 @@ class Parsed(object):
         self.unattended = False
         self.coder_llm = None
         self.reviewer_llm = None
+        self.max_age = None  # ensure 心跳阈值覆盖（秒）；None = 默认公式
         self.rest = []
 
     def __repr__(self):
         return ("Parsed(mode=%r, interval=%r, once=%r, foreground=%r, llm=%r, "
                 "id=%r, timeout=%r, unattended=%r, coder_llm=%r, reviewer_llm=%r, "
-                "rest=%r)"
+                "max_age=%r, rest=%r)"
                 % (self.mode, self.interval, self.once, self.foreground, self.llm,
                    self.id, self.timeout, self.unattended, self.coder_llm,
-                   self.reviewer_llm, self.rest))
+                   self.reviewer_llm, self.max_age, self.rest))
 
 
 def usage():
@@ -115,6 +120,7 @@ def usage():
         "      autoloop both --foreground                       # 前台常驻（配合 tmux 看实时输出）",
         "      autoloop stop                                      # 停止本项目常驻 both 实例",
         "      autoloop status                                    # 单屏聚合：壳死活/LLM 子进程/in-progress/最近事件",
+        "      autoloop ensure [--max-age S]                      # 看门狗：幂等探活+拉起（供定时器高频调用）",
         "默认: both 无参数 = 常驻并自动后台（日志 runtime/logs/autoloop-both.log）；--once 前台单轮",
         "      coder/reviewer 单模式默认单轮（--once）",
         "注意: autoloop 是 Python 3 脚本（用 python kit/cli/autoloop 调用；Linux 也可 ./kit/cli/autoloop）。",
@@ -190,6 +196,15 @@ def parse_args(argv):
             if v is None:
                 return None
             p.reviewer_llm = v
+        elif a == "--max-age":
+            v, i = _take_value(argv, i, a)
+            if v is None:
+                return None
+            try:
+                p.max_age = int(v)
+            except ValueError:
+                log("✗ --max-age 必须是整数秒: %s" % v, err=True)
+                return None
         else:
             p.rest.append(a)
             i += 1
@@ -327,10 +342,23 @@ def run_resident(root, p, interval, lib_dir=None):
         log("═══ autoloop both 常驻（PID %d，每 %ds 一轮；Ctrl-C 停止）═══"
             % (os.getpid(), interval))
         while True:
-            run_role(root, "coder", build_role_args(p, p.coder_llm, once=True),
-                     lib_dir=lib_dir)
-            run_role(root, "reviewer", build_role_args(p, p.reviewer_llm, once=True),
-                     lib_dir=lib_dir)
+            rc_coder = run_role(root, "coder", build_role_args(p, p.coder_llm, once=True),
+                                lib_dir=lib_dir)
+            # 网关不可恢复错误快速失败（TASK-107 P1-1）：角色轮次返回 86（provider
+            # 输出命中不可重试网关错误，见 llm.FATAL_PATTERNS）→ 循环立即退出，
+            # 不再空转重试；恢复交给看门狗 `autoloop ensure`（P0-1）或人工。
+            # reviewer 本轮跳过：网关已死，跑了也白跑。
+            if rc_coder == llm.FATAL_EXIT:
+                log("✗ coder 网关不可恢复错误（exit %d），both 常驻快速失败退出"
+                    % rc_coder, err=True)
+                return llm.FATAL_EXIT
+            rc_reviewer = run_role(root, "reviewer",
+                                   build_role_args(p, p.reviewer_llm, once=True),
+                                   lib_dir=lib_dir)
+            if rc_reviewer == llm.FATAL_EXIT:
+                log("✗ reviewer 网关不可恢复错误（exit %d），both 常驻快速失败退出"
+                    % rc_reviewer, err=True)
+                return llm.FATAL_EXIT
             log("本轮完成，%ds 后重试" % interval)
             time.sleep(interval)
     except KeyboardInterrupt:
@@ -528,8 +556,8 @@ def reap_llm_pid(root, why="daemon stop"):
     return True
 
 
-def _heartbeat_age(path, now):
-    """心跳文件 mtime 距今秒数；文件缺失返回 None。"""
+def heartbeat_age(path, now):
+    """心跳文件 mtime 距 now 秒数；文件缺失返回 None（公开：task CLI 存活守卫复用）。"""
     try:
         return now - os.path.getmtime(path)
     except OSError:
@@ -572,7 +600,7 @@ def _scan_llm_processes():
 
 def _fmt_hb(name, log_dir, now, hb_max):
     """单角色心跳行：age 与阈值对比 → 新鲜 / 停滞 / 无心跳。"""
-    age = _heartbeat_age(os.path.join(log_dir, "autoloop-%s.heartbeat" % name), now)
+    age = heartbeat_age(os.path.join(log_dir, "autoloop-%s.heartbeat" % name), now)
     if age is None:
         return "  %-9s: 无心跳（从未运行或已清理）" % name
     tag = "新鲜" if age <= hb_max else "停滞（超 %ds 未跳动，可能卡在长 LLM 会话或壳已僵死）" % hb_max
@@ -688,6 +716,87 @@ def cmd_stop(root):
     return 0
 
 
+# ---------------- ensure（看门狗，TASK-107） ----------------
+
+def ensure_threshold(interval, timeout):
+    """ensure 默认心跳阈值（秒）：2×轮询间隔 + LLM 超时（单测锚点）。
+
+    循环活性看"最新一次心跳"（两角色心跳取 min）：常驻一轮内 coder 会话
+    结束后 reviewer 心跳才刷新，coder 心跳可自然老到 interval+2×timeout；
+    取最新心跳后，正常最长间隔 = interval + timeout，冗余一倍即为本式。
+    """
+    return 2 * int(interval) + int(timeout)
+
+
+def ensure_decision(pid_alive, hb_age, threshold):
+    """纯判定（单测锚点）：ensure 应采取的动作 → (action, token)。
+
+    action:
+      spawn   —— 壳不在（PID 文件缺失或进程已死；文件锁随进程死亡由 OS 释放，可直接拉起）
+      restart —— 壳在但最新心跳已停滞（> 阈值）：先终止僵死实例再拉起，
+                 否则内层 both 锁会拒绝新实例（拉而不换 = 永远拉不起来）
+      noop    —— 健康；或进程太新无法判定（心跳从未写 = 只信 PID，防误杀新生实例）
+    """
+    if not pid_alive:
+        return ("spawn", "pid-dead")
+    if hb_age is not None and hb_age > threshold:
+        return ("restart", "heartbeat-stale(%d>%ds)" % (hb_age, threshold))
+    return ("noop", "healthy")
+
+
+def cmd_ensure(root, p, launcher_script=None):
+    """幂等探活 + 拉起（看门狗入口，TASK-107）：健康 no-op；壳死/心跳停滞 → 拉起。
+
+    供外部定时器（schtasks / systemd timer / cron）高频调用：
+      - 防重复依赖既有内层 autoloop-both.lock：并发/连续两次 ensure 至多一个
+        实例胜出（spawn_background 锁探针 + 子进程 run_resident 内层锁双保险）；
+      - restart 分支（壳存活但心跳停滞）先 SIGTERM 僵死实例（触发 daemon 收尾：
+        收编 LLM 子进程、释放锁）再拉起；
+      - 返回码：0 = 健康 or 已拉起；1 = 拉起失败/参数非法（并发锁竞争拒启属
+        预期，胜出实例已在跑，定时器可忽略本次失败）。
+    阈值：默认 ensure_threshold(both_interval, timeout)；--max-age 秒数覆盖。
+    """
+    if p.max_age is not None and p.max_age <= 0:
+        log("✗ --max-age 必须为正整数秒", err=True)
+        return 1
+    lock_dir = os.path.join(root, "runtime", "locks")
+    log_dir = os.path.join(root, "runtime", "logs")
+    now = time.time()
+    pid = 0
+    try:
+        with open(os.path.join(lock_dir, BOTH_PID), encoding="ascii") as f:
+            pid = int(f.read().strip() or "0")
+    except (OSError, ValueError):
+        pass
+    alive = pid > 0 and _pid_alive(pid)
+    interval = both_interval(p)
+    timeout = p.timeout if p.timeout is not None else DEFAULT_TIMEOUT
+    threshold = p.max_age if p.max_age is not None else ensure_threshold(interval, timeout)
+    # 最新一次循环活动 = 两角色既有心跳里最年轻者（None = 从未写心跳）
+    ages = [heartbeat_age(os.path.join(log_dir, "autoloop-%s.heartbeat" % name), now)
+            for name in ("coder", "reviewer")]
+    present = [a for a in ages if a is not None]
+    hb_age = min(present) if present else None
+    action, token = ensure_decision(alive, hb_age, threshold)
+    if action == "noop":
+        log("✓ autoloop both 健康（%s；阈值 %ds），no-op" % (token, threshold))
+        return 0
+    if action == "restart":
+        log("⚠ autoloop both 壳存活但最新心跳停滞（%s，阈值 %ds）——终止僵死实例（PID %d）后拉起"
+            % (token, threshold, pid))
+        if not _kill_pid(pid):
+            log("⚠ 进程 %d 未正常退出，已强制 kill" % pid, err=True)
+        try:
+            os.remove(os.path.join(lock_dir, BOTH_PID))
+        except OSError:
+            pass
+    else:
+        log("△ autoloop both 不在运行（%s）——拉起中" % token)
+    rc = spawn_background(root, launcher_script or os.path.abspath(sys.argv[0]),
+                          p, interval)
+    return 0 if rc == 0 else 1
+
+
 # ---------------- 模式分发 ----------------
 
 def cmd_single(root, mode, p, lib_dir=None):
@@ -728,6 +837,8 @@ def main(argv=None):
         return cmd_stop(root)
     if mode == "status":
         return cmd_status(root, p)
+    if mode == "ensure":
+        return cmd_ensure(root, p, launcher_script=os.path.abspath(sys.argv[0]))
     if mode in ("coder", "reviewer"):
         if p.coder_llm or p.reviewer_llm:
             log("✗ --coder-llm/--reviewer-llm 仅用于 both 模式", err=True)
@@ -738,7 +849,7 @@ def main(argv=None):
         return cmd_single(root, mode, p)
     if mode == "both":
         return cmd_both(root, p, launcher_script=os.path.abspath(sys.argv[0]))
-    log("✗ 未知模式: %s（支持 coder | reviewer | both | stop | status）" % mode, err=True)
+    log("✗ 未知模式: %s（支持 coder | reviewer | both | stop | status | ensure）" % mode, err=True)
     return 1
 
 

@@ -124,7 +124,8 @@ class RunLlmTaskLogTests(_LogsCase):
     @staticmethod
     def _fake_run_argv(calls, child_text="stub-session-out"):
         def fake(argv, env, timeout=None, stdout=None, stderr=None,
-                 root=None, llm_name=None, task_id=None, on_start=None):
+                 root=None, llm_name=None, task_id=None, on_start=None,
+                 fatal_scan_path=None, fatal_scan_start=None):
             calls.append((llm_name, task_id))
             if on_start is not None:
                 on_start(777)  # 先头部后输出（与真实 Popen 时序一致）
@@ -255,7 +256,8 @@ class RunLlmSessionDirTests(_LogsCase):
     @staticmethod
     def _argv_capturing_run_argv(calls):
         def fake(argv, env, timeout=None, stdout=None, stderr=None,
-                 root=None, llm_name=None, task_id=None, on_start=None):
+                 root=None, llm_name=None, task_id=None, on_start=None,
+                 fatal_scan_path=None, fatal_scan_start=None):
             calls.append(list(argv))
             stdout.write("stub-session-out\n")
             return 0

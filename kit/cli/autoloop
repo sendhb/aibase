@@ -14,6 +14,7 @@ autoloop — Python 版 autoloop 启动器薄入口（TASK-025，迁移设计 TA
   python kit/cli/autoloop both --foreground    # 前台常驻（Ctrl-C 停止）
   python kit/cli/autoloop stop                 # 停止本项目常驻 both 实例
   python kit/cli/autoloop status               # 单屏聚合：壳死活/LLM 子进程/in-progress/最近事件
+  python kit/cli/autoloop ensure               # 看门狗：幂等探活+拉起（供定时器高频调用，TASK-107）
   python kit/cli/autoloop coder --interval 300 # 常驻轮询（覆盖默认单轮）
 
 注意: 本文件是 Python 3 脚本（与 cli/task 一致），用 `python kit/cli/autoloop`

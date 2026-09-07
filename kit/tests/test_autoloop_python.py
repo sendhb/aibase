@@ -38,6 +38,7 @@ import autoloop_coder as C  # noqa: E402
 import autoloop_launcher as L  # noqa: E402
 import autoloop_reviewer as R  # noqa: E402
 import events  # noqa: E402
+import llm  # noqa: E402
 
 PY = sys.executable
 LAUNCHER = os.path.join(_REPO, "kit", "cli", "autoloop")
@@ -75,7 +76,7 @@ class _RootCase(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(self._cleanup_tmp)
         self.root = self.tmp.name
         with open(os.path.join(self.root, "aios.config.yaml"), "w") as f:
             f.write("commands: {}\n")
@@ -83,6 +84,19 @@ class _RootCase(unittest.TestCase):
         self.logs = os.path.join(self.root, "runtime", "logs")
         os.makedirs(self.tasks)
         os.makedirs(self.logs)
+
+    def _cleanup_tmp(self):
+        """容错清理（Windows）：E2E 分离子进程可能仍短暂持有 log 句柄，
+        立即 rmtree 会 WinError 32（TASK-107 实测）。短暂等待重试一次，
+        仍失败则放行（OS 临时目录终会回收；断言已在 cleanup 前完成）。"""
+        try:
+            self.tmp.cleanup()
+        except OSError:
+            time.sleep(0.3)
+            try:
+                self.tmp.cleanup()
+            except OSError:
+                pass
 
 
 class CoderArgsTests(unittest.TestCase):
@@ -362,6 +376,138 @@ class LauncherUnitTests(_RootCase):
             self.assertEqual(L.main(["coder", "--coder-llm", "pi"]), 1)
 
 
+class FatalScanTests(unittest.TestCase):
+    """llm.scan_fatal_output 纯函数（TASK-107 P1-1）：宁可漏判，不可误杀。"""
+
+    def test_hits(self):
+        for text in ("gateway_error: quota exceeded",
+                     "Error 403004: API key suspended",
+                     "account in arrears, please top up",
+                     "账户欠费，请充值后重试",
+                     "request failed: HTTP 401",
+                     "http/1.1 403",
+                     "Status Code 401 Unauthorized",
+                     "403 Forbidden"):
+            self.assertIsNotNone(llm.scan_fatal_output(text), text)
+
+    def test_clean_output_not_flagged(self):
+        for text in ("", "all good", "TASK-123 done", "error 500, retrying",
+                     "rate limited 429, backoff", "line 4030 of file.py"):
+            self.assertIsNone(llm.scan_fatal_output(text), text)
+
+
+class FatalFastFailTests(_RootCase):
+    """stub provider 输出网关错误 → 会话秒级终止 + error 事件（TASK-107 P1-1）。"""
+
+    FATAL_STUB = ("print('gateway_error 403004 in arrears', flush=True); "
+                  "import time; time.sleep(60)")
+
+    def _run_coder(self, code, timeout):
+        with mock.patch.object(C, "_resolve_provider_argv",
+                               return_value=([PY, "-c", code], None)):
+            return C.run_llm_coder("pi", "P", log_dir=self.logs, task="TASK-901",
+                                   timeout=timeout)
+
+    def test_fatal_terminates_fast_with_error_event(self):
+        t0 = time.monotonic()
+        rc = self._run_coder(self.FATAL_STUB, timeout=60)
+        elapsed = time.monotonic() - t0
+        self.assertEqual(rc, llm.FATAL_EXIT)
+        self.assertLess(elapsed, 30, "应秒级终止，而非拖满 timeout")
+        self.assertEqual(_outcomes(self.logs, "coder"), ["error"])
+
+    def test_timeout_semantics_unchanged(self):
+        rc = self._run_coder("import time; time.sleep(30)", timeout=2)
+        self.assertEqual(rc, 124)
+        self.assertEqual(_outcomes(self.logs, "coder"), ["timeout"])
+
+    def test_reviewer_fatal_fast_fail(self):
+        with mock.patch.object(R, "_resolve_provider_argv",
+                               return_value=([PY, "-c", self.FATAL_STUB], None)):
+            rc = R.run_llm_reviewer("pi", "P", log_dir=self.logs,
+                                    task="TASK-901", timeout=60)
+        self.assertEqual(rc, llm.FATAL_EXIT)
+        self.assertEqual(_outcomes(self.logs, "reviewer"), ["error"])
+
+    # ---- 2026-09-06 事故回归：fatal 扫描只认本轮新增字节 ----
+    # per-task log 跨轮累积，历史轮的 mock 测试文本（"HTTP 401"）与 LLM
+    # 应答任务正文的 "欠费" 等留在文件尾部，全文件尾部扫描会秒杀后续
+    # 每一轮会话（TASK-107 被自家卷宗卡死 ~2.2h 实录）。
+
+    POLLUTED_LOG = "历史 mock: 推送失败（HTTP 401）\n历史应答: 账户欠费\n" * 40
+
+    def _prewrite_task_log(self, role_dir_flag=None):
+        tpath = os.path.join(self.logs, "tasks", "TASK-901.log")
+        os.makedirs(os.path.dirname(tpath), exist_ok=True)
+        with open(tpath, "w", encoding="utf-8") as f:
+            f.write(self.POLLUTED_LOG)
+        return tpath
+
+    def test_polluted_history_bytes_not_fatal_coder(self):
+        self._prewrite_task_log()
+        rc = self._run_coder("print('clean output'); import sys; sys.exit(0)",
+                             timeout=30)
+        self.assertEqual(rc, 0, "历史字节不得误杀本轮干净会话")
+        self.assertEqual(_outcomes(self.logs, "coder"), ["ok"])
+
+    def test_polluted_history_bytes_not_fatal_reviewer(self):
+        self._prewrite_task_log()
+        with mock.patch.object(R, "_resolve_provider_argv",
+                               return_value=([PY, "-c",
+                                              "print('clean'); import sys; sys.exit(0)"],
+                                             None)):
+            rc = R.run_llm_reviewer("pi", "P", log_dir=self.logs,
+                                    task="TASK-901", timeout=30)
+        self.assertEqual(rc, 0)
+        self.assertEqual(_outcomes(self.logs, "reviewer"), ["ok"])
+
+    def test_new_bytes_still_fatal(self):
+        """偏移语义不漏判：本轮新增字节命中特征词仍秒级终止。"""
+        rc = self._run_coder("print('HTTP 401 from this round', flush=True); "
+                             "import time; time.sleep(60)", timeout=60)
+        self.assertEqual(rc, llm.FATAL_EXIT)
+
+    def test_tail_text_from_scopes_offset(self):
+        p = os.path.join(self.logs, "tail_from.log")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("http 401 old" * 100)
+        size = os.path.getsize(p)
+        with open(p, "a", encoding="utf-8") as f:
+            f.write("clean new bytes")
+        self.assertEqual(C._tail_text_from(p, 8192, size), "clean new bytes")
+        self.assertEqual(C._tail_text_from(p, 8192, size + 100), "")
+        # 全文件尾部会误判（旧行为）；偏移语义不误判
+        self.assertIsNotNone(llm.scan_fatal_output(C._tail_text(p, 8192)))
+        self.assertIsNone(llm.scan_fatal_output(C._tail_text_from(p, 8192, size)))
+
+
+class EnsureUnitTests(_RootCase):
+    """ensure 纯函数与参数解析（TASK-107 P0-1）。"""
+
+    def test_ensure_threshold(self):
+        self.assertEqual(L.ensure_threshold(30, 1800), 1860)
+        self.assertEqual(L.ensure_threshold(300, 600), 1200)
+
+    def test_ensure_decision_branches(self):
+        # 壳不在（PID 缺失/已死）→ spawn
+        self.assertEqual(L.ensure_decision(False, None, 100), ("spawn", "pid-dead"))
+        # 壳在 + 心跳停滞 → restart
+        self.assertEqual(L.ensure_decision(True, 150, 100)[0], "restart")
+        # 壳在 + 心跳新鲜 / 从未写心跳（进程太新防误杀）→ noop
+        self.assertEqual(L.ensure_decision(True, 50, 100), ("noop", "healthy"))
+        self.assertEqual(L.ensure_decision(True, None, 100), ("noop", "healthy"))
+
+    def test_parse_args_max_age(self):
+        p = L.parse_args(["ensure", "--max-age", "60"])
+        self.assertEqual((p.mode, p.max_age), ("ensure", 60))
+        self.assertIsNone(L.parse_args(["ensure", "--max-age"]), None)
+        self.assertIsNone(L.parse_args(["ensure", "--max-age", "abc"]), None)
+
+    def test_cmd_ensure_rejects_bad_max_age(self):
+        p = L.parse_args(["ensure", "--max-age", "0"])
+        self.assertEqual(L.cmd_ensure(self.root, p), 1)
+
+
 class LauncherE2ETests(_RootCase):
     """子进程 e2e：stub 角色核心 + 临时项目根，绝不触碰真实任务/真实 LLM。"""
 
@@ -442,6 +588,88 @@ class LauncherE2ETests(_RootCase):
             with contextlib.redirect_stderr(io.StringIO()):
                 with contextlib.redirect_stdout(io.StringIO()):
                     L.cmd_stop(self.root)  # 兜底清理，避免残留常驻进程
+
+    def _heartbeat_files(self):
+        return [os.path.join(self.logs_dir, "autoloop-%s.heartbeat" % n)
+                for n in ("coder", "reviewer")]
+
+    def test_ensure_spawns_when_dead_and_idempotent(self):
+        """验收：杀掉 both 后运行一次能拉起；连续两次不双实例（no-op）。"""
+        proc = self._run("ensure")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        pidfile = os.path.join(self.root, "runtime", "locks", L.BOTH_PID)
+        self.assertTrue(self._wait_for(lambda: os.path.isfile(pidfile), 15),
+                        "ensure 后应出现 PID 文件")
+        with open(pidfile, encoding="ascii") as f:
+            pid = int(f.read().strip())
+        self.assertTrue(L._pid_alive(pid))
+        try:
+            second = self._run("ensure")
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertIn("no-op", second.stdout, "健康时第二次 ensure 应 no-op")
+            with open(pidfile, encoding="ascii") as f:
+                self.assertEqual(int(f.read().strip()), pid, "不应产生第二实例")
+        finally:
+            with contextlib.redirect_stderr(io.StringIO()):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    L.cmd_stop(self.root)
+
+    def test_ensure_noop_when_pid_alive(self):
+        """壳存活但无心跳（进程太新/无 stub 心跳）→ 只信 PID，no-op 不误杀。"""
+        lock_dir = os.path.join(self.root, "runtime", "locks")
+        os.makedirs(lock_dir, exist_ok=True)
+        fake = subprocess.Popen([PY, "-c", "import time; time.sleep(30)"])
+        pidfile = os.path.join(lock_dir, L.BOTH_PID)
+        with open(pidfile, "w", encoding="ascii") as f:
+            f.write(str(fake.pid))
+        try:
+            proc = self._run("ensure")
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("no-op", proc.stdout)
+            self.assertTrue(L._pid_alive(fake.pid), "健康判定不得杀壳")
+        finally:
+            fake.terminate()
+            fake.wait(timeout=10)
+            os.remove(pidfile)
+
+    def test_ensure_restarts_when_heartbeat_stale(self):
+        """壳存活但心跳停滞 → restart：先杀僵死实例再拉起新实例。"""
+        lock_dir = os.path.join(self.root, "runtime", "locks")
+        os.makedirs(lock_dir, exist_ok=True)
+        self.logs_dir = os.path.join(self.root, "runtime", "logs")
+        os.makedirs(self.logs_dir, exist_ok=True)
+        fake = subprocess.Popen([PY, "-c", "import time; time.sleep(60)"])
+        pidfile = os.path.join(lock_dir, L.BOTH_PID)
+        with open(pidfile, "w", encoding="ascii") as f:
+            f.write(str(fake.pid))
+        old = time.time() - 99999
+        for hb in self._heartbeat_files():
+            with open(hb, "w", encoding="utf-8") as f:
+                f.write("stale")
+            os.utime(hb, (old, old))
+        try:
+            proc = self._run("ensure")
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            # poll() 先收尸（直接子进程死后成僵尸，_pid_alive 对僵尸返回 True，
+            # 真实场景 daemon 为孤儿由 init 收尸，无此问题）
+            self.assertTrue(self._wait_for(lambda: fake.poll() is not None, 15),
+                            "僵死实例应被终止")
+            self.assertFalse(L._pid_alive(fake.pid))
+            self.assertTrue(self._wait_for(lambda: os.path.isfile(pidfile), 15),
+                            "restart 后应拉起新实例（新 PID 文件）")
+            with open(pidfile, encoding="ascii") as f:
+                new_pid = int(f.read().strip())
+            self.assertNotEqual(new_pid, fake.pid)
+            self.assertTrue(L._pid_alive(new_pid))
+        finally:
+            with contextlib.redirect_stderr(io.StringIO()):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    L.cmd_stop(self.root)
+                    try:
+                        fake.terminate()
+                        fake.wait(timeout=5)
+                    except Exception:  # noqa: BLE001 — 已被 restart 击杀则忽略
+                        pass
 
 
 if __name__ == "__main__":

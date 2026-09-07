@@ -9,3 +9,4 @@
 {"created": "2026-09-04", "done_at": "2026-09-05", "duration_days": 1, "priority": "P2", "rework-count": 0, "risk": "P2", "task": "TASK-101-review-guard", "updated": "2026-09-05"}
 {"created": "2026-09-05", "done_at": "2026-09-05", "duration_days": 0, "priority": "P2", "rework-count": 0, "risk": "P2", "task": "TASK-105-re-init-kit", "updated": "2026-09-05"}
 {"created": "2026-09-04", "done_at": "2026-09-05", "duration_days": 1, "priority": "P2", "rework-count": 0, "risk": "P2", "task": "TASK-104-session-log-web-live", "updated": "2026-09-05"}
+{"created": "2026-09-06", "done_at": "2026-09-06", "duration_days": 0, "priority": "P1", "rework-count": 0, "risk": "P1", "task": "TASK-107-autoloop-selfheal", "updated": "2026-09-06"}
