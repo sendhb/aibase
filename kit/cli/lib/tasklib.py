@@ -14,6 +14,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 
 STATUSES = ["open", "in-progress", "in-review", "blocked", "done", "cancelled"]
 REWORK_LIMIT = 2  # 自动返工上限：rework-count 0→1→2 允许，2→3 拒绝（TASK-047）
@@ -126,6 +127,40 @@ def pick_task(tasks_dir):
 def short_id(ref):
     m = re.match(r"^(TASK-\d{3})", ref or "")
     return m.group(1) if m else None
+
+
+# ---------------- 滞留巡检（TASK-108） ----------------
+# 供 autoloop reviewer 循环 import 复用（不写第二套判定）；语义对齐
+# cli/task `task stale`（updated 日期粒度、宁早勿晚，默认阈值 2h）。
+
+
+def stale_hours(updated, now):
+    """metadata.updated（日期粒度）→ 滞留小时数（自当日 00:00 起算，宁早勿晚）；
+    不可解析 → None；未来日期 → 0.0（纯函数，单测锚点；与 cli/task._stale_hours
+    同语义——其属既有 CLI 代码，本卡范围不改 CLI）。"""
+    try:
+        base = datetime.datetime.strptime(str(updated).strip(), "%Y-%m-%d")
+    except ValueError:
+        return None
+    return max(0.0, (now - base.timestamp()) / 3600.0)
+
+
+def stale_in_review(tasks_dir, hours, now=None):
+    """in-review 滞留巡检：返回 [(任务文件 basename, 滞留小时)]（仅超阈值的）。
+
+    与 cli/task cmd_stale 同语义：只看 in-review，updated 日期粒度（同日转
+    review 自当日 00:00 起算，宁可早报）；updated 缺失/不可解析不误报。
+    basename 保留全名（对齐 cmd_stale 输出），autoloop 侧自行 short_id。"""
+    now = time.time() if now is None else now
+    stale = []
+    for f in task_files(tasks_dir):
+        _, fm = load_task(os.path.join(tasks_dir, f))
+        if not fm or fm.get("metadata.status") != "in-review":
+            continue
+        age = stale_hours(fm_get(fm, "metadata.updated"), now)
+        if age is not None and age > hours:
+            stale.append((f[:-3], age))
+    return stale
 
 
 def fm_get(fm, key):
@@ -309,6 +344,19 @@ def set_status(path, new_status, verify_dir, review_dir, log_dir, root=None,
     if cur == new_status:
         print(f"已是 {new_status}: {os.path.basename(path)}")
         return
+    # fast-path 不变量（TASK-108）：fast-path 任务（非 P0/P1 且未指定 reviewer）
+    # 禁止进入 in-review——进入后 reviewer 循环只会静默跳过（TASK-099/100 实录，
+    # 第 4 次：aimonitor TASK-073 滞留 24h+，3900+ 轮静默跳过）。set_status 是
+    # 所有状态转换的单一卡点，本不变量不提供 force 旁路：任何入口（cli/task、
+    # autoloop、直接 import 本库）都绕不过。cmd_review 的二选一提示是友好前置，
+    # 这里是机械兑底。解堵路径：task start 打回 in-progress 后按 fast-path done。
+    if new_status == "in-review" and is_fast_path(fm):
+        die(f"{short_id(fm.get('name')) or os.path.basename(path)} 是 fast-path"
+            f"（risk/priority 非 P0/P1 且未指定 reviewer），不可转 in-review："
+            f"reviewer 循环会静默跳过（TASK-108 不变量，任何入口不可绕过）。\n"
+            f"  二选一：\n"
+            f"  ① 编辑 front-matter 指定 reviewer（完整路径，由独立会话审查）\n"
+            f"  ② 走 fast-path：确认 VERIFY 记录存在后直接 task done")
     if not force and new_status not in TRANSITIONS.get(cur or "", []):
         die(f"非法状态转换: {cur} → {new_status}（允许: {TRANSITIONS.get(cur or '', [])}）")
     if new_status == "done" and not force:

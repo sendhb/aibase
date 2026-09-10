@@ -47,7 +47,8 @@ def main():
     # ── 1. 真 aimonitor server（临时目录）───────────────────────────────
     with open(os.path.join(TMP, "projects.json"), "w", encoding="utf-8") as f:
         json.dump({"projects": [{"id": PROJ_ID, "name": PROJ_ID,
-                                 "path": "D:/nonexistent-smoke"}]}, f)
+                                 "path": "D:/nonexistent-smoke",
+                                 "transport": "agent"}]}, f)
     agents_path = os.path.join(TMP, "agents.json")
     with open(agents_path, "w", encoding="utf-8") as f:
         json.dump({PROJ_ID + "-agent": {"token": TOK_AGENT, "projects": [PROJ_ID]},
@@ -107,7 +108,7 @@ def main():
         json.dump({"server_url": "http://127.0.0.1:%d" % port, "token": TOK_AGENT,
                    "projects": [{"id": PROJ_ID, "path": proj_dir}],
                    "poll_interval_seconds": 5, "downlink_enabled": True}, f)
-    r = subprocess.run([PY, os.path.join(AIBASE, "kit", "tools", "agent", "agent.py"),
+    r = subprocess.run([PY, os.path.join(AIBASE, "kit", "tools", "telemetry", "agent.py"),
                         "--once", "--config", agent_json],
                        cwd=AIBASE, capture_output=True, text=True,
                        encoding="utf-8", errors="replace", timeout=180)

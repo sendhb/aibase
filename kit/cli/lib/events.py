@@ -9,7 +9,8 @@ events.py — 心跳与 autoloop 事件日志（Python 版 heartbeat.sh，TASK-0
   - events   : <log_dir>/autoloop-<name>-events.jsonl
       每轮一行 JSON `{"ts": <float 秒>, "task": <短 id 或 "-">, "outcome": <枚举>}`，
       append-only；outcome ∈ no_task / blocked_p0 / blocked_rework / ok / error / timeout
-      （与旧 heartbeat.sh emit_event 完全一致）。
+      （与旧 heartbeat.sh emit_event 完全一致）+ skip_fastpath / stale_in_review
+      （TASK-108 显式告警：in-review+fast-path 静默跳过升级为事件 / in-review 滞留巡检）。
 
 失败降级语义与旧版一致：事件写入失败只告警、不阻断主循环（旧 Bash 在 set -e
 下 return 0 降级而非杀掉 autoloop）。
@@ -22,7 +23,11 @@ import sys
 import time
 
 # autoloop 循环产出的事件 outcome 枚举（监控端 aimonitor TASK-071 按此统计失败率）
-OUTCOMES = ("no_task", "blocked_p0", "blocked_rework", "ok", "error", "timeout")
+# skip_fastpath / stale_in_review（TASK-108）：显式告警事件——reviewer 循环遇
+# in-review+fast-path 跳过不再静默；in-review 滞留巡检逐任务告警（第 4 次实录
+# aimonitor TASK-073 滞留 24h+，3900+ 轮静默跳过）。
+OUTCOMES = ("no_task", "blocked_p0", "blocked_rework", "ok", "error", "timeout",
+            "skip_fastpath", "stale_in_review")
 
 
 def heartbeat_path(log_dir, name):
@@ -48,13 +53,15 @@ def heartbeat(log_dir, name):
     return path
 
 
-def emit_event(log_dir, name, task, outcome):
+def emit_event(log_dir, name, task, outcome, reason=None):
     """向 autoloop-<name>-events.jsonl 追加一行事件 JSON；失败只告警不阻断。
 
     参数与旧 heartbeat.sh emit_event 完全一致：
       task    —— 任务短 id（TASK-xxx）或 "-"（无任务轮）
       outcome —— OUTCOMES 枚举之一
     行格式：{"ts": <float 秒>, "task": <str>, "outcome": <str>}
+    TASK-108：可选 reason —— 仅告警类新事件（skip_fastpath / stale_in_review）
+    携带；不传则不写该字段（既有事件格式逐字节不变）。
     """
     if outcome not in OUTCOMES:
         raise ValueError(
@@ -63,11 +70,11 @@ def emit_event(log_dir, name, task, outcome):
     try:
         os.makedirs(log_dir, exist_ok=True)
         path = events_path(log_dir, name)
+        record = {"ts": time.time(), "task": task, "outcome": outcome}
+        if reason is not None:
+            record["reason"] = reason
         with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(
-                {"ts": time.time(), "task": task, "outcome": outcome},
-                ensure_ascii=False,
-            ) + "\n")
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
     except OSError as e:
         print("⚠ emit_event: 事件写入失败（不影响循环）: %s" % e, file=sys.stderr)
 

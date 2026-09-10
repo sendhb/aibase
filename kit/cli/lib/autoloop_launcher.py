@@ -43,6 +43,7 @@ import sys
 import time
 
 import lock  # noqa: E402  跨平台进程文件锁（TASK-012）
+import events  # noqa: E402  心跳与 autoloop 事件（TASK-022；watchdog 心跳/事件用，TASK-111）
 import tasklib  # noqa: E402  项目根定位（TASK-021）
 import llm  # noqa: E402  LLM 退出码常量（TASK-107 P1-1 循环层快速失败；无循环依赖）
 
@@ -55,6 +56,11 @@ BOTH_LOCK = "autoloop-both.lock"
 STOP_TIMEOUT = 5  # stop 等待进程正常退出秒数，超时强制 kill
 LLM_PID = "autoloop-llm.pid"  # 存活的 LLM 子进程 PID 记录（TASK-099 孤儿收编）
 DEFAULT_TIMEOUT = 1800  # 与 autoloop_coder.DEFAULT_TIMEOUT 一致（LLM 会话超时）
+# watchdog（本仓自看看门狗，TASK-111）常量：
+DEFAULT_WATCHDOG_INTERVAL = 120  # 看门狗巡检间隔（秒），AUTOLOOP_WATCHDOG_INTERVAL 可覆盖
+ENSURE_TIMEOUT = 30  # ensure 子进程超时（秒）：悬挂只损失一轮，不拖死巡检循环（红线 2）
+WATCHDOG_PID = "autoloop-watchdog.pid"
+WATCHDOG_LOCK = "autoloop-watchdog.lock"
 # LLM 子进程 cmdline 特征（与 llm._provider_argv 生成的一致）
 LLM_PROC_PATTERNS = ("pi -p ", "claude -p ", "codewhale exec --auto")
 
@@ -121,6 +127,7 @@ def usage():
         "      autoloop stop                                      # 停止本项目常驻 both 实例",
         "      autoloop status                                    # 单屏聚合：壳死活/LLM 子进程/in-progress/最近事件",
         "      autoloop ensure [--max-age S]                      # 看门狗：幂等探活+拉起（供定时器高频调用）",
+        "      autoloop watchdog [--interval N] [--once] [--max-age S]  # 本仓自看看门狗：常驻薄壳定时调 ensure（TASK-111）",
         "默认: both 无参数 = 常驻并自动后台（日志 runtime/logs/autoloop-both.log）；--once 前台单轮",
         "      coder/reviewer 单模式默认单轮（--once）",
         "注意: autoloop 是 Python 3 脚本（用 python kit/cli/autoloop 调用；Linux 也可 ./kit/cli/autoloop）。",
@@ -277,7 +284,10 @@ def run_role(root, role, args, lib_dir=None):
         return 1
     log("▶ %s %s %s" % (sys.executable, os.path.basename(script), " ".join(args)))
     try:
-        proc = subprocess.run([sys.executable, script] + args, cwd=root)
+        # creationflags=llm.NO_WINDOW（TASK-084）：detached both 壳无 console，
+        # 不加则 Windows 每轮为角色核心弹可见窗口（存活期 = 整轮时长）。
+        proc = subprocess.run([sys.executable, script] + args, cwd=root,
+                              creationflags=llm.NO_WINDOW)
     except FileNotFoundError:
         log("✗ 找不到解释器: %s" % sys.executable, err=True)
         return 127
@@ -633,6 +643,18 @@ def cmd_status(root, p):
         log("① 壳 both: 已停止（无 PID 文件）")
     for name in ("coder", "reviewer"):
         log(_fmt_hb(name, log_dir, now, hb_max))
+    # ①-b 看门狗（TASK-111）：死活 + 心跳（阈值 3×巡检间隔，仅展示参考）
+    wd_pid = 0
+    try:
+        with open(_watchdog_pidfile(root), encoding="ascii") as f:
+            wd_pid = int(f.read().strip() or "0")
+    except (OSError, ValueError):
+        pass
+    if wd_pid > 0 and _pid_alive(wd_pid):
+        log("① 看门狗: 运行中（PID %d）" % wd_pid)
+    else:
+        log("① 看门狗: 已停止（启动：autoloop watchdog）")
+    log(_fmt_hb("watchdog", log_dir, now, watchdog_interval(p) * 3))
 
     # ② LLM 子进程：PID 记录（本轮在跑）+ ps 扫描（孤儿暴露，人工决策兑底）
     rec = read_llm_pid(root)
@@ -678,16 +700,16 @@ def cmd_status(root, p):
     log("④ 最近事件:")
     for ln in _tail_lines(os.path.join(log_dir, "task-events.jsonl"), 5):
         log("  task : %s" % ln.rstrip())
-    for name in ("coder", "reviewer"):
+    for name in ("coder", "reviewer", "watchdog"):
         for ln in _tail_lines(os.path.join(log_dir, "autoloop-%s-events.jsonl" % name), 2):
             log("  %-6s: %s" % (name, ln.rstrip()))
     return 0
 
 
-def cmd_stop(root):
-    """停止本项目常驻 both 实例（PID 文件 + 锁双确认，与旧 Bash stop 一致）。"""
+def _stop_resident(root, label, pid_name, lock_name):
+    """停一个常驻实例（PID 文件优先；锁兜底告警）。供 cmd_stop 管理 both + 看门狗。"""
     lock_dir = os.path.join(root, "runtime", "locks")
-    pidfile = os.path.join(lock_dir, BOTH_PID)
+    pidfile = os.path.join(lock_dir, pid_name)
     if os.path.isfile(pidfile):
         try:
             with open(pidfile, encoding="ascii") as f:
@@ -695,24 +717,37 @@ def cmd_stop(root):
         except (OSError, ValueError):
             pid = 0
         if pid > 0 and _pid_alive(pid):
-            log("正在停止 autoloop both（PID %d）..." % pid)
+            log("正在停止 autoloop %s（PID %d）..." % (label, pid))
             if not _kill_pid(pid):
                 log("⚠ 进程 %d 未在 %ds 内正常退出，已强制 kill" % (pid, STOP_TIMEOUT), err=True)
             else:
-                log("✓ autoloop both 已停止（PID %d）" % pid)
+                log("✓ autoloop %s 已停止（PID %d）" % (label, pid))
         else:
             log("· 进程 %d 已不在运行（清理过期 PID 文件）" % pid)
         try:
             os.remove(pidfile)
         except OSError:
             pass
-        return 0
-    both_lock = os.path.join(lock_dir, BOTH_LOCK)
-    if os.path.isfile(both_lock) and not _lock_probe(both_lock):
-        log("⚠ 锁被占用但无 PID 文件，无法定位进程（可能是旧版启动的实例或残留锁）。", err=True)
-        log("  可用 ps aux | grep autoloop 查找并 kill 对应 PID；锁可删 %s" % both_lock, err=True)
+        return
+    lockfile = os.path.join(lock_dir, lock_name)
+    if os.path.isfile(lockfile) and not _lock_probe(lockfile):
+        log("⚠ %s 锁被占用但无 PID 文件，无法定位进程（可能是旧版启动的实例或残留锁）。"
+            % label, err=True)
+        log("  可用 ps aux | grep autoloop 查找并 kill 对应 PID；锁可删 %s" % lockfile, err=True)
     else:
-        log("· 本项目没有运行中的 autoloop both 实例")
+        log("· 本项目没有运行中的 autoloop %s 实例" % label)
+
+
+def cmd_stop(root):
+    """停止本项目常驻实例：看门狗 + both（PID 文件 + 锁双确认；TASK-111 纳入看门狗）。
+
+    顺序固定：**先看门狗后 both**——看门狗死亡时 subprocess.run 会连带 kill 其
+    在途 ensure 子进程（CPython run() 对 KeyboardInterrupt 统一 kill），若反序
+    （先 both 后看门狗）则在途 ensure 会读到已删 PID 文件而复活拉起新 both
+    （孤儿 ensure 复活竞态，e2e 实测复现）。
+    """
+    _stop_resident(root, "watchdog", WATCHDOG_PID, WATCHDOG_LOCK)
+    _stop_resident(root, "both", BOTH_PID, BOTH_LOCK)
     return 0
 
 
@@ -797,6 +832,108 @@ def cmd_ensure(root, p, launcher_script=None):
     return 0 if rc == 0 else 1
 
 
+# ---------------- watchdog（本仓自看看门狗，TASK-111） ----------------
+
+def watchdog_interval(p):
+    """看门狗巡检间隔（秒）：--interval > AUTOLOOP_WATCHDOG_INTERVAL > 默认 120（单测锚点）。"""
+    if p.interval is not None:
+        return int(p.interval)
+    try:
+        return int(os.environ.get("AUTOLOOP_WATCHDOG_INTERVAL")
+                   or DEFAULT_WATCHDOG_INTERVAL)
+    except ValueError:
+        return DEFAULT_WATCHDOG_INTERVAL
+
+
+def run_ensure(root, launcher_script=None, max_age=None, timeout=ENSURE_TIMEOUT):
+    """薄壳子进程调 ensure（红线 1：生死判定零复制，ensure_decision 单源）；返回 (ok, detail)。
+
+    红线 2：ensure 自身悬挂/启动失败只损失一轮，异常捕获为 error 事件，
+    不向巡检循环上抛——监督者不因被监督工具的意外而死亡。
+    """
+    argv = [sys.executable, launcher_script or LAUNCHER_SCRIPT, "ensure"]
+    if max_age is not None:
+        argv += ["--max-age", str(int(max_age))]
+    try:
+        r = subprocess.run(argv, cwd=root, timeout=timeout,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           text=True, encoding="utf-8", errors="replace",
+                           creationflags=llm.NO_WINDOW)  # TASK-084 弹窗抑制
+    except subprocess.TimeoutExpired:
+        return False, "ensure 子进程超时（>%ds）" % int(timeout)
+    except OSError as e:
+        return False, "ensure 子进程启动失败: %s" % e
+    lines = [ln for ln in (r.stdout or "").strip().splitlines() if ln.strip()]
+    tail = lines[-1][:80] if lines else ""
+    return r.returncode == 0, "rc=%d %s" % (r.returncode, tail)
+
+
+def watchdog_round(root, p, launcher_script=None):
+    """单轮巡检：ensure 子进程 + 心跳 + 事件（红线 3：死亡 = 事件流停滞，远端可见）。
+
+    事件 outcome：ok（ensure rc=0）/ error（rc≠0、超时、启动失败）；task 恒为
+    "-"（无任务轮）。返回 (ok, detail)。
+    """
+    log_dir = os.path.join(root, "runtime", "logs")
+    ok, detail = run_ensure(root, launcher_script, max_age=p.max_age)
+    events.heartbeat(log_dir, "watchdog")
+    events.emit_event(log_dir, "watchdog", "-", "ok" if ok else "error", reason=detail)
+    log("◆ watchdog 巡检: %s" % detail)
+    return ok, detail
+
+
+def cmd_watchdog(root, p, launcher_script=None):
+    """本仓自看看门狗（TASK-111）：常驻薄壳，每轮以子进程调 ensure 探活+拉起本仓 autoloop。
+
+    每仓自看（无项目清单/注册表，cwd 即项目根，零配置）；与系统定时器可并存
+    （ensure 幂等 + both 锁防重，至多一个实例胜出）。单实例防重：watchdog.lock
+    （flock 随进程死亡 OS 释放）。--once 单轮自检不持锁。
+    红线 4：不扩职责——in-progress 孤儿检测等超出 ensure 语义的需求另立 TASK。
+    """
+    if p.once:
+        return 0 if watchdog_round(root, p, launcher_script)[0] else 1
+    lock_dir = os.path.join(root, "runtime", "locks")
+    os.makedirs(lock_dir, exist_ok=True)
+    wd_lock = os.path.join(lock_dir, WATCHDOG_LOCK)
+    try:
+        fd = lock._open_lock(wd_lock)
+    except OSError as e:
+        log("✗ 无法打开锁文件 %s: %s" % (wd_lock, e), err=True)
+        return 1
+    if not lock._acquire(fd):
+        log("✗ 看门狗已在运行（锁被占用: %s，拒绝重复启动）" % wd_lock, err=True)
+        os.close(fd)
+        return 1
+    with open(_watchdog_pidfile(root), "w", encoding="ascii") as f:
+        f.write(str(os.getpid()))
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, _stop_handler)
+        except (ValueError, OSError):
+            pass
+    interval = watchdog_interval(p)
+    try:
+        log("═══ autoloop watchdog 常驻（PID %d，每 %ds 巡检；Ctrl-C 停止）═══"
+            % (os.getpid(), interval))
+        while True:
+            watchdog_round(root, p, launcher_script)
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        log("── 看门狗停止 ──")
+    finally:
+        lock._release(fd)
+        os.close(fd)
+        try:
+            os.remove(_watchdog_pidfile(root))
+        except OSError:
+            pass
+    return 0
+
+
+def _watchdog_pidfile(root):
+    return os.path.join(root, "runtime", "locks", WATCHDOG_PID)
+
+
 # ---------------- 模式分发 ----------------
 
 def cmd_single(root, mode, p, lib_dir=None):
@@ -839,6 +976,8 @@ def main(argv=None):
         return cmd_status(root, p)
     if mode == "ensure":
         return cmd_ensure(root, p, launcher_script=os.path.abspath(sys.argv[0]))
+    if mode == "watchdog":
+        return cmd_watchdog(root, p, launcher_script=os.path.abspath(sys.argv[0]))
     if mode in ("coder", "reviewer"):
         if p.coder_llm or p.reviewer_llm:
             log("✗ --coder-llm/--reviewer-llm 仅用于 both 模式", err=True)
@@ -849,7 +988,7 @@ def main(argv=None):
         return cmd_single(root, mode, p)
     if mode == "both":
         return cmd_both(root, p, launcher_script=os.path.abspath(sys.argv[0]))
-    log("✗ 未知模式: %s（支持 coder | reviewer | both | stop | status | ensure）" % mode, err=True)
+    log("✗ 未知模式: %s（支持 coder | reviewer | both | stop | status | ensure | watchdog）" % mode, err=True)
     return 1
 
 

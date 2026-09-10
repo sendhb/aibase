@@ -102,7 +102,8 @@ def _task_cli(root, *args):
     try:
         proc = subprocess.run([sys.executable, script] + list(args),
                               cwd=root, capture_output=True, text=True,
-                              encoding="utf-8", errors="replace")
+                              encoding="utf-8", errors="replace",
+                              creationflags=llm.NO_WINDOW)  # TASK-084 弹窗抑制
     except FileNotFoundError:
         log("✗ 找不到 task CLI: %s" % script)
         return 127
@@ -183,7 +184,8 @@ def _run_argv(argv, env, timeout=None, stdout=None, stderr=None,
     （整文件，兼容旧行为/空文件场景）。
     """
     try:
-        proc = subprocess.Popen(argv, stdout=stdout, stderr=stderr, env=env)
+        proc = subprocess.Popen(argv, stdout=stdout, stderr=stderr, env=env,
+                                creationflags=llm.NO_WINDOW)  # TASK-084 弹窗抑制
     except FileNotFoundError:
         print("✗ run_llm: 找不到可执行文件: %s" % argv[0], file=sys.stderr)
         return llm.EXIT_NOT_FOUND

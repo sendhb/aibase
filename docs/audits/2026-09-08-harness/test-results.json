@@ -1,0 +1,55 @@
+{
+  "date": "2026-09-08",
+  "aios_commit": "1adfb26",
+  "aimonitor_commit": "b93d5b2",
+  "aios_unit_tests": {
+    "command": "python3 -B -m unittest discover -s kit/tests",
+    "exit": 0,
+    "total": 775,
+    "skipped": 1,
+    "passed": 774,
+    "seconds": 85.245,
+    "note": "Existing test_agent_smoke reads the real repository runtime and may advance telemetry cursors; no live AIMonitor endpoint was used."
+  },
+  "aimonitor_environment": "Temporary source copy; synthetic registry for aimonitor/aibase; no production database or credentials copied.",
+  "aimonitor_tests": [
+    {
+      "command": "bash scripts/build.sh",
+      "exit": 0,
+      "seconds": 0.05
+    },
+    {
+      "command": "node test/hello.test.js",
+      "exit": 0,
+      "seconds": 0.08
+    },
+    {
+      "command": "/usr/bin/python3 -B test/downlink_test.py",
+      "exit": 1,
+      "seconds": 1.25,
+      "stdout_tail": "TEST-001 入队端点",
+      "stderr_tail": "  File \"/tmp/aimonitor-audit-suites-6qog3nuh/aimonitor/test/downlink_test.py\", line 105, in _enqueue\n    return _req(port, \"POST\", \"/api/downlink/commands\", body, token=token)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/aimonitor-audit-suites-6qog3nuh/aimonitor/test/downlink_test.py\", line 90, in _req\n    resp = conn.getresponse()\n           ^^^^^^^^^^^^^^^^^^\n  File \"/usr/lib/python3.12/http/client.py\", line 1457, in getresponse\n    response.begin()\n  File \"/usr/lib/python3.12/http/client.py\", line 336, in begin\n    version, status, reason = self._read_status()\n                              ^^^^^^^^^^^^^^^^^^^\n  File \"/usr/lib/python3.12/http/client.py\", line 305, in _read_status\n    raise RemoteDisconnected(\"Remote end closed connection without\"\nhttp.client.RemoteDisconnected: Remote end closed connection without response"
+    },
+    {
+      "command": "/usr/bin/python3 -B test/server_smoke.py",
+      "exit": 1,
+      "seconds": 17.93,
+      "stdout_tail": "✓ renew 后旧 token 推 ingest → 401\n✓ renew 后新 token 可推送\n✓ TASK-053：POST /api/register/:req_id/revoke 和 /api/register/:req_id/renew 全部通过\n✓ /api/status 结构与数据\n✓ 静态文件 / 200\n✓ 路径穿越被拦截 (403)\n✓ /api/history 结构与数据\n✓ /api/history 参数校验 (400 + NaN/inf/超上限)\n✓ /api/history 默认 hours 与无数据项目\n✓ /api/projects/:id/events 结构与 limit\n✓ 默认 limit 与未知项目 404\n✓ limit 参数校验 (400 + NaN/inf/非整数/超上限)",
+      "stderr_tail": "⚠ /tmp/aimonitor-agents-cfg-os5xj68k/agents-nonobj-1.json 顶层必须是 JSON 对象，拒绝加载 token（fail-closed）\n⚠ /tmp/aimonitor-agents-cfg-os5xj68k/agents-nonobj-2.json 顶层必须是 JSON 对象，拒绝加载 token（fail-closed）\n⚠ /tmp/aimonitor-admin-auth-82k59f9s/bad-admin.json 权限不是 600（group/other 可读），拒绝加载 admin 密码（fail-closed）\n⚠ /tmp/aimonitor-admin-auth-82k59f9s/bad-admin2.json 权限不是 600（group/other 可读），拒绝加载 admin 密码（fail-closed）\n[2026-09-08 11:43:53] agents.json 写入失败: [Errno 21] Is a directory: '/tmp/aimonitor-revoke-renew-j3rvoe88/agents-bad.json.tmp'\nTraceback (most recent call last):\n  File \"/tmp/aimonitor-audit-suites-6qog3nuh/aimonitor/test/server_smoke.py\", line 4288, in <module>\n    main()\n  File \"/tmp/aimonitor-audit-suites-6qog3nuh/aimonitor/test/server_smoke.py\", line 4283, in main\n    test_server()\n  File \"/tmp/aimonitor-audit-suites-6qog3nuh/aimonitor/test/server_smoke.py\", line 3936, in test_server\n    assert t023 is not None, \"aimonitor 项目应含 TASK-023\"\n           ^^^^^^^^^^^^^^^^\nAssertionError: aimonitor 项目应含 TASK-023"
+    },
+    {
+      "command": "/usr/bin/python3 -B test/registration_test.py --coverage",
+      "exit": 1,
+      "seconds": 9.86,
+      "stdout_tail": "✓ TEST-009 全部通过\n\n✓ registration_test 全部通过\n===== COVERAGE (stdlib trace) — 注册子系统（VERIFY-001） =====\n  L1519-2048:  291/309   94.17%\n  L2425-2642:   51/167   30.54%\n  L3221-3243:   13/21    61.90%\n  L3345-3945:  197/445   44.27%\n  注册子系统合计:  552/942   58.60%\n  全模块（参考）: 1587/2993  53.02%\n\n✗ 注册子系统行覆盖率 58.60% （阈值 85.0%）",
+      "stderr_tail": "[2026-09-08 11:44:02] agents.json 写入失败: 模拟磁盘故障（写 agents.json 失败）\n[2026-09-08 11:44:02] agents.json 写入失败: 模拟磁盘故障（写 agents.json 失败）\n[2026-09-08 11:44:02] agents.json 写入失败: 模拟磁盘故障（写 agents.json 失败）\n⚠ 读取 /tmp/aimonitor-reg-008-fk9p2tta/admin-bad.json 失败（Expecting property name enclosed in double quotes: line 1 column 2 (char 1)），拒绝加载 admin 密码（fail-closed）\n⚠ /tmp/aimonitor-reg-008-fk9p2tta/admin-wide.json 权限不是 600（group/other 可读），拒绝加载 admin 密码（fail-closed）\n⚠ /tmp/aimonitor-reg-008-fk9p2tta/admin-nofield.json 缺少 admin_password 字段或非字符串，拒绝加载 admin 密码（fail-closed）\n⚠ 读取 /tmp/aimonitor-reg-008-fk9p2tta/admin-bad.json 失败（Expecting property name enclosed in double quotes: line 1 column 2 (char 1)），拒绝加载 admin 密码（fail-closed）\n⚠ /tmp/aimonitor-reg-008-fk9p2tta/admin-wide.json 权限不是 600（group/other 可读），拒绝加载 admin 密码（fail-closed）\n⚠ /tmp/aimonitor-reg-008-fk9p2tta/admin-nofield.json 缺少 admin_password 字段或非字符串，拒绝加载 admin 密码（fail-closed）\n[2026-09-08 11:44:02] enrollment_code 消费失败: 模拟注册码消费失败\n[2026-09-08 11:44:03] agents.json 写入失败: 模拟 issue 写失败（remove 成功、issue 失败窗口）\n⚠ /tmp/aimonitor-reg-008-fk9p2tta/arr.json 顶层必须是 JSON 对象，拒绝加载 token（fail-closed）\n⚠ /tmp/aimonitor-reg-008-fk9p2tta/arr.json 顶层必须是 JSON 对象，拒绝加载 admin 密码（fail-closed）\n✗ 注册子系统行覆盖率 58.60% < 85.0%（VERIFY-001）"
+    },
+    {
+      "command": "/usr/bin/python3 -B test/security_test.py",
+      "exit": 0,
+      "seconds": 4.97,
+      "stdout_tail": "✓ 源码审计：ApiHandler._reject 无 token 泄露\n✓ 源码审计：ApiHandler._revoke 无 token 泄露\n✓ 源码审计：ApiHandler._renew 无 token 泄露\n✓ 源码审计：ApiHandler._register_status 无 token 泄露\n✓ 源码审计：ApiHandler._ingest 无 token 泄露\n✓ 源码审计：ApiHandler.do_POST 无 token 泄露\n✓ TokenIssuer.issue 运行时无 token 日志输出\n✓ VERIFY-001 日志中无 token 明文\n  ✅ VERIFY-001 日志无 token 明文 通过\n\n============================================================\n  ✅ 全部 6 个测试通过",
+      "stderr_tail": ""
+    }
+  ]
+}

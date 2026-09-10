@@ -14,6 +14,7 @@
 用法: python -m unittest kit.tests.test_agent_downlink
 """
 import http.server
+import json
 import os
 import subprocess
 import tempfile
@@ -337,6 +338,7 @@ class HttpTests(unittest.TestCase):
                                                  "stdout_tail": "", "stderr_tail": "",
                                                  "finished_at": "Z"})
         self.assertEqual(seen["path"], "/api/downlink/commands/42/result")
+        self.assertEqual(json.loads(seen["body"])["command_id"], 42, "契约 §四：body 携带 command_id")
         self.assertEqual(out, {"command_id": 42, "status": "done"})
         out = dl.report_result(base, "tok", 42, {"status": "failed", "exit_code": 1,
                                                  "stdout_tail": "", "stderr_tail": "",

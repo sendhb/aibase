@@ -15,6 +15,7 @@ die() 走 sys.exit → 用 assertRaises(SystemExit) + redirect_stderr 捕获（�
 Windows GBK 控制台编码 ✗ 字符报错，TASK-011 教训）。
 """
 import contextlib
+import datetime
 import io
 import os
 import shutil
@@ -31,7 +32,9 @@ import tasklib  # noqa: E402
 
 
 def _write_task(path, status="open", risk="P2", priority="P2", reviewer="any",
-                approval="none", rework="0", assignee="any", extra=""):
+                approval="none", rework="0", assignee="any", extra="",
+                updated=None):
+    updated_line = ("  updated: %s\n" % updated) if updated else ""
     fm = (
         "---\n"
         "name: %s\n"
@@ -45,12 +48,13 @@ def _write_task(path, status="open", risk="P2", priority="P2", reviewer="any",
         "  assignee: %s\n"
         "  reviewer: %s\n"
         "  rework-count: %s\n"
+        "%s"
         "  depends-on: []\n"
         "  tags: [test]\n"
         "---\n\n"
         "# body\n\n%s\n"
     ) % (os.path.basename(path)[:-3], status, priority, risk, approval,
-         assignee, reviewer, rework, extra)
+         assignee, reviewer, rework, updated_line, extra)
     with open(path, "w", encoding="utf-8") as f:
         f.write(fm)
     return path
@@ -151,6 +155,45 @@ class TaskPickTests(unittest.TestCase):
         self.assertEqual(tasklib.pick_task(self.tasks), None)
 
 
+class StaleScanTests(unittest.TestCase):
+    """TASK-108：in-review 滞留巡检（stale_hours / stale_in_review）——
+    cli/task `task stale` 与 autoloop reviewer 循环共用同一实现（单一事实源）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.tasks = os.path.join(self.tmp.name, "tasks")
+        os.makedirs(self.tasks)
+
+    def test_stale_hours_pure(self):
+        base = datetime.datetime(2026, 1, 1)
+        now = base.timestamp() + 36 * 3600
+        self.assertAlmostEqual(tasklib.stale_hours("2026-01-01", now), 36.0)
+        self.assertIsNone(tasklib.stale_hours("not-a-date", now))
+        self.assertEqual(tasklib.stale_hours("2099-01-01", now), 0.0)
+
+    def test_stale_in_review_hits_only_in_review_older_than(self):
+        # 注入固定 now（今日 01:00）——updated 是日期粒度、同日自 00:00 起算、
+        # 阈值 2h：不注入则本地时间过 02:00 后 fresh 必被判 stale（时序翻症，
+        # TASK-097 同族教训：测试不得赌墙钟）。
+        today = datetime.date.today()
+        now = datetime.datetime.combine(today, datetime.time(1, 0)).timestamp()
+        _write_task(os.path.join(self.tasks, "TASK-911-stale.md"),
+                    status="in-review", updated=(today - datetime.timedelta(days=3)).isoformat())
+        _write_task(os.path.join(self.tasks, "TASK-912-fresh.md"),
+                    status="in-review", updated=today.isoformat())
+        _write_task(os.path.join(self.tasks, "TASK-913-done.md"),
+                    status="done", updated=(today - datetime.timedelta(days=3)).isoformat())
+        _write_task(os.path.join(self.tasks, "TASK-914-bad.md"),
+                    status="in-review", updated="garbage")
+        stale = tasklib.stale_in_review(self.tasks, 2.0, now=now)
+        self.assertEqual([name for name, _ in stale], ["TASK-911-stale"])
+        self.assertGreaterEqual(stale[0][1], 72.0)  # 日期粒度：≥3 天自 00:00 起算
+
+    def test_stale_in_review_empty_dir(self):
+        self.assertEqual(tasklib.stale_in_review(self.tasks, 2.0), [])
+
+
 class GovernanceTests(unittest.TestCase):
     def _fm(self, risk="P2", priority="P2", reviewer="any", approval="none",
             rework="0", status="open"):
@@ -240,6 +283,56 @@ class SetStatusTests(unittest.TestCase):
                                self.logs, root=self.root)
         errors, total = tasklib.validate_events(self.logs)
         self.assertEqual((errors, total), (0, 0))
+
+    def test_fast_path_cannot_enter_review(self):
+        # TASK-108 验收：绕过 cmd_review 入口直接调 set_status（reviewer=any）
+        # → 非零退出 die，stderr 含 "fast-path"；die 先于任何状态变更/事件写入。
+        path = _write_task(os.path.join(self.tasks, "TASK-921-fast.md"),
+                           status="in-progress", risk="P2", reviewer="any")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            with self.assertRaises(SystemExit):
+                tasklib.set_status(path, "in-review", self.verify, self.reviews,
+                                   self.logs, root=self.root)
+        self.assertIn("fast-path", err.getvalue())
+        _, fm = tasklib.load_task(path)
+        self.assertEqual(fm.get("metadata.status"), "in-progress")
+        self.assertEqual(tasklib.validate_events(self.logs), (0, 0))
+
+    def test_fast_path_invariant_no_force_bypass(self):
+        # 任何入口不可绕过：force=True 同样拒绝（set_status 是单一卡点）
+        path = _write_task(os.path.join(self.tasks, "TASK-922-fast.md"),
+                           status="in-progress", risk="P2", reviewer="any")
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                tasklib.set_status(path, "in-review", self.verify, self.reviews,
+                                   self.logs, root=self.root, force=True)
+        _, fm = tasklib.load_task(path)
+        self.assertEqual(fm.get("metadata.status"), "in-progress")
+
+    def test_reviewer_specified_enters_review(self):
+        # 防过度拦截回归：指定 reviewer（非 fast-path）→ in-review 正常转换
+        path = _write_task(os.path.join(self.tasks, "TASK-923-full.md"),
+                           status="in-progress", risk="P2", reviewer="bob")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            tasklib.set_status(path, "in-review", self.verify, self.reviews,
+                               self.logs, root=self.root,
+                               ev="task.review_requested")
+        _, fm = tasklib.load_task(path)
+        self.assertEqual(fm.get("metadata.status"), "in-review")
+        self.assertEqual(tasklib.validate_events(self.logs), (0, 1))
+
+    def test_stuck_fast_path_in_review_can_unstick_via_start(self):
+        # 存量滞留任务解堵路径：in-review → in-progress 不受不变量影响
+        path = _write_task(os.path.join(self.tasks, "TASK-924-stuck.md"),
+                           status="in-review", risk="P2", reviewer="any")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            tasklib.set_status(path, "in-progress", self.verify, self.reviews,
+                               self.logs, root=self.root)
+        _, fm = tasklib.load_task(path)
+        self.assertEqual(fm.get("metadata.status"), "in-progress")
 
 
 class BumpReworkTests(unittest.TestCase):

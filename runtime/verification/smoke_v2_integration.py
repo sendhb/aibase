@@ -48,7 +48,7 @@ TOK_AGENT = "tok-agent-a"
 TOK_AGENT_B = "tok-agent-b"
 TOK_DISP = "tok-dispatcher"
 DISPATCHER = os.path.join(AIBASE, "kit", "tools", "dispatcher", "dispatcher.py")
-AGENT = os.path.join(AIBASE, "kit", "tools", "agent", "agent.py")
+AGENT = os.path.join(AIBASE, "kit", "tools", "telemetry", "agent.py")
 
 STUB_AUTOLOOP = '''#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
@@ -93,8 +93,8 @@ def db_commands(project_id):
     conn = sqlite3.connect(os.path.join(TMP, "downlink.db"))
     try:
         rows = conn.execute(
-            "SELECT command_id, status FROM downlink_commands WHERE project_id=? "
-            "ORDER BY command_id", (project_id,)).fetchall()
+            "SELECT command_id, status FROM command WHERE project_id=? "
+            "ORDER BY seq", (project_id,)).fetchall()
     except sqlite3.OperationalError:
         return []  # 表懒建（首次入队才建）：队列尚空
     finally:
@@ -159,8 +159,10 @@ def main():
     global SERVER
     # ── 1. 真 aimonitor server（两个项目入 config，poll 2s 加速聚合）────
     with open(os.path.join(TMP, "projects.json"), "w", encoding="utf-8") as f:
-        json.dump({"projects": [{"id": PROJ_A, "path": os.path.join(TMP, PROJ_A)},
-                                {"id": PROJ_B, "path": os.path.join(TMP, PROJ_B)}]}, f)
+        json.dump({"projects": [{"id": PROJ_A, "path": os.path.join(TMP, PROJ_A),
+                                 "transport": "agent"},
+                                {"id": PROJ_B, "path": os.path.join(TMP, PROJ_B),
+                                 "transport": "agent"}]}, f)
     with open(os.path.join(TMP, "agents.json"), "w", encoding="utf-8") as f:
         json.dump({PROJ_A + "-agent": {"token": TOK_AGENT, "projects": [PROJ_A]},
                    PROJ_B + "-agent": {"token": TOK_AGENT_B, "projects": [PROJ_B]},
@@ -350,14 +352,26 @@ def main():
     if not any(e["ev"] == "dispatcher.human" for e in ev_b):
         failures.append("5 事件流缺 dispatcher.human: %s"
                         % [e["ev"] for e in ev_b])
-    # server 拾取超时回收（lazy，进程内触发；pickiup_timeout=2s、重投上限 0）
-    now = time.time()
-    ms.ApiHandler.state.downlink.pickup([PROJ_B], now, pickup_timeout=2, max_requeue=0)
+    # server 拾取超时回收（lazy：仅在对应 token 白名单的 pickup 调用内扫描）——
+    # 把 PROJ_B 的 queued 指令窗口压到过去，重投上限置 0 → 直接 failed(pickup-timeout)
+    conn = sqlite3.connect(os.path.join(TMP, "downlink.db"))
+    try:
+        conn.execute("UPDATE command SET pickup_deadline=0"
+                     " WHERE project_id=? AND status='queued'", (PROJ_B,))
+        conn.commit()
+    finally:
+        conn.close()
+    old_max = ms.DOWNLINK_MAX_REDELIVERIES
+    ms.DOWNLINK_MAX_REDELIVERIES = 0
+    try:
+        ms.ApiHandler.state.downlink.pickup(PROJ_B + "-agent", [PROJ_B])
+    finally:
+        ms.DOWNLINK_MAX_REDELIVERIES = old_max
     rows_b = db_commands(PROJ_B)
     conn = sqlite3.connect(os.path.join(TMP, "downlink.db"))
     try:
         detail = conn.execute(
-            "SELECT command_id, status, result_json FROM downlink_commands "
+            "SELECT command_id, status, result_json FROM command "
             "WHERE project_id=?", (PROJ_B,)).fetchall()
     finally:
         conn.close()

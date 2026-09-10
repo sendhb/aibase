@@ -33,6 +33,13 @@ TIMEOUT_EXIT = 124  # 与 GNU `timeout` CLI 退出码约定一致（超时被 ki
 FATAL_EXIT = 86  # provider 不可恢复错误快速失败退出码（≠124/127；事件层按 error 记，TASK-107）
 PROVIDERS = ("claude", "deepseek", "pi")
 
+# Windows 弹窗抑制（TASK-084）：无 console 的父进程（DETACHED both 壳 / 计划任务
+# watchdog / pythonw）创建 console 子程序（python.exe / pi 等）时，系统自动为其
+# 分配可见 console → 每轮弹窗。CREATE_NO_WINDOW 分配隐藏 console，孙进程（task
+# CLI、LLM provider）继承之不再弹窗，stdout/stderr 重定向行为不变。POSIX 无此
+# 常量 → getattr 回落 0（POSIX Popen 接受 creationflags=0，非 0 才报错）。
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 # 不可重试错误特征（小写子串匹配，TASK-107）：网关拒绝/欠费/账号隔离类错误重试
 # 无意义，只会拖满 timeout 把整个 autoloop 循环拖死。刻意保守：只收网关错误码与
 # HTTP 401/403 的显式形态，避免误杀正常会话输出（如任务正文恰好含 401 字样）。
@@ -148,7 +155,8 @@ def run_llm(provider, prompt, timeout=None, unattended=False, stdout=None, stder
     argv = _provider_argv(provider, prompt, unattended=unattended)
     env = _deepseek_env() if provider.strip().lower() == "deepseek" else None
     try:
-        proc = subprocess.Popen(argv, stdout=stdout, stderr=stderr, env=env)
+        proc = subprocess.Popen(argv, stdout=stdout, stderr=stderr, env=env,
+                                creationflags=NO_WINDOW)
     except FileNotFoundError:
         print("✗ run_llm: 找不到可执行文件: %s" % argv[0], file=sys.stderr)
         return EXIT_NOT_FOUND

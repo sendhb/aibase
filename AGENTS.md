@@ -45,6 +45,7 @@
 - [`kit/cli/README.md`](kit/cli/README.md) — 统一调度入口
 - [`kit/profiles/`](kit/profiles/) — 项目类型模板（backend/game-server/unity/design/…）
 - [`kit/docs/ARCHITECTURE.md`](kit/docs/ARCHITECTURE.md) — 架构设计说明
+- **文档归属（三层）**：受众决定位置——框架内容放 `kit/**`（升级整体替换、publish 下发，零项目特定内容；设计文档 `kit/docs/`、工具手册就近 `kit/cli/`）；项目自有内容放根 `docs/`/`knowledge/`（升级不触碰，如 ROADMAP）；判据单源 = `kit/cli/mkproject` 头注释
 
 ## 规则红线（每次动作前检查）
 

@@ -13,7 +13,7 @@
 #        -KitDir "C:\src\the5\aibase\kit" `
 #        -ProjectsJson "C:\temp\projects.json" `
 #        -AgentsJson "C:\temp\agents.json" `
-#        -ServerUrl "http://47.109.205.200:3113/api/ingest"
+#        -ServerUrl "http://localhost:3113/api/ingest"
 #   3) 完成后：服务端验证 + aibase dispatcher reachability（见脚本末尾输出）
 #
 # 安全：agent.json（含 token）默认写入 C:\etc\aios-agent（本机盘，非网络共享），
@@ -24,7 +24,7 @@ param(
     [Parameter(Mandatory = $true)][string] $KitDir,
     [Parameter(Mandatory = $true)][string] $ProjectsJson,
     [Parameter(Mandatory = $true)][string] $AgentsJson,
-    [string] $ServerUrl = "http://47.109.205.200:3113/api/ingest",
+    [string] $ServerUrl = "http://localhost:3113/api/ingest",
     [string] $ConfigDir = "C:\etc\aios-agent",
     [switch] $SkipScheduler,
     [switch] $NoTestPush

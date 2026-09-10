@@ -10,3 +10,10 @@
 {"created": "2026-09-05", "done_at": "2026-09-05", "duration_days": 0, "priority": "P2", "rework-count": 0, "risk": "P2", "task": "TASK-105-re-init-kit", "updated": "2026-09-05"}
 {"created": "2026-09-04", "done_at": "2026-09-05", "duration_days": 1, "priority": "P2", "rework-count": 0, "risk": "P2", "task": "TASK-104-session-log-web-live", "updated": "2026-09-05"}
 {"created": "2026-09-06", "done_at": "2026-09-06", "duration_days": 0, "priority": "P1", "rework-count": 0, "risk": "P1", "task": "TASK-107-autoloop-selfheal", "updated": "2026-09-06"}
+{"created": "2026-09-07", "done_at": "2026-09-07", "duration_days": 0, "priority": "P3", "rework-count": 0, "risk": "P3", "task": "TASK-109-autoloop-sequence-diagram-doc", "updated": "2026-09-07"}
+{"created": "2026-09-08", "done_at": "2026-09-08", "duration_days": 0, "priority": "P3", "rework-count": 0, "risk": "P3", "task": "TASK-110-docs-placement-rule-and-seq-generalize", "updated": "2026-09-08"}
+{"created": "2026-09-07", "done_at": "2026-09-08", "duration_days": 0, "priority": "P2", "rework-count": 0, "risk": "P2", "task": "TASK-108-reviewer-silent-skip-rootfix", "updated": "2026-09-07"}
+{"created": "2026-09-08", "done_at": "2026-09-08", "duration_days": 0, "priority": "P2", "rework-count": 0, "risk": "P2", "task": "TASK-111-per-project-self-watchdog", "updated": "2026-09-08"}
+{"created": "2026-09-09", "done_at": "2026-09-09", "duration_days": 0, "priority": "P2", "rework-count": 0, "risk": "P2", "task": "TASK-084-autoloop-win-console-flash", "updated": "2026-09-09"}
+{"created": "2026-09-10", "done_at": "2026-09-10", "duration_days": 0, "priority": "P2", "rework-count": 0, "risk": "P2", "task": "TASK-085-tools-agent-dir-cleanup", "updated": "2026-09-10"}
+{"created": "2026-09-10", "done_at": "2026-09-10", "duration_days": 0, "priority": "P1", "rework-count": 0, "risk": "P1", "task": "TASK-086-downlink-channel-fix", "updated": "2026-09-10"}

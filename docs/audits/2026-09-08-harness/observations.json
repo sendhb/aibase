@@ -1,0 +1,176 @@
+{
+  "stale_evidence": {
+    "initial_verify_exit": 0,
+    "after_code_change_verify_exit": 1,
+    "close_exit": 0,
+    "final_status": "done"
+  },
+  "task_selection": {
+    "selected": "TASK-001",
+    "dependency_status": "blocked",
+    "higher_priority_ready": "TASK-003",
+    "start_stub_exit": 1,
+    "llm_called_for": [
+      "TASK-001"
+    ],
+    "assignee_after": "autoloop-coder",
+    "task_status_after": "open",
+    "round_exit": 0
+  },
+  "scheduler": {
+    "projects_chosen_each_round": [
+      [
+        "a"
+      ],
+      [
+        "a"
+      ],
+      [
+        "a"
+      ]
+    ],
+    "both_allocations_accepted": true,
+    "persisted_workers": [
+      "worker-2"
+    ],
+    "commands_after_failed_start": [
+      "task_start",
+      "autoloop_coder"
+    ],
+    "coder_command_arguments": []
+  },
+  "identity_and_P0": {
+    "designated_reviewer": "designated-bob",
+    "other_reviewer_selected": "TASK-001",
+    "local_blocks_priority_P0_risk_P2": false,
+    "dispatcher_decision": "p0-blocked"
+  },
+  "process_lifecycle": {
+    "timeout_exit": 124,
+    "grandchild_survived": true,
+    "elapsed_seconds": 0.81,
+    "second_role_attempted_to_kill_first": true
+  },
+  "fatal_false_positive": {
+    "normal_test_discussion_exit": 86,
+    "expected_without_false_positive": 0
+  },
+  "lost_result": {
+    "result_report_attempts": 1,
+    "later_ticks": [
+      "empty",
+      "empty",
+      "empty"
+    ],
+    "result_spool_files": 0
+  },
+  "telemetry_truncation": {
+    "source_task_count": 61,
+    "transmitted_task_count": 50,
+    "transmitted_open_count": 0,
+    "latest_role_event_transmitted": false
+  },
+  "context_and_task_ids": {
+    "context_budget": 600,
+    "allocated_lines": 668,
+    "task_1000_visible": false,
+    "short_id_of_task_1000": "TASK-100"
+  },
+  "aimonitor": {
+    "duplicate_definitions": [
+      {
+        "scope": "module",
+        "name": "DownlinkStore",
+        "lines": [
+          2100,
+          2921
+        ]
+      },
+      {
+        "scope": "ApiHandler",
+        "name": "_downlink_enqueue",
+        "lines": [
+          3342,
+          3501
+        ]
+      },
+      {
+        "scope": "ApiHandler",
+        "name": "_downlink_pickup",
+        "lines": [
+          3402,
+          3541
+        ]
+      },
+      {
+        "scope": "ApiHandler",
+        "name": "_downlink_status",
+        "lines": [
+          3409,
+          3597
+        ]
+      },
+      {
+        "scope": "ApiHandler",
+        "name": "_downlink_result",
+        "lines": [
+          3417,
+          3554
+        ]
+      }
+    ],
+    "endpoints": {
+      "enqueue": {
+        "client_error": "RemoteDisconnected"
+      },
+      "pickup": {
+        "client_error": "RemoteDisconnected"
+      },
+      "result": {
+        "client_error": "RemoteDisconnected"
+      },
+      "unauthenticated_status": {
+        "http": 200,
+        "body": {
+          "generated_at": 1788838520.0022535,
+          "poll_interval_seconds": 30,
+          "heartbeat_stale_threshold_seconds": 300,
+          "alerts": {
+            "count": 0,
+            "items": []
+          },
+          "projects": []
+        }
+      },
+      "unauthenticated_session": {
+        "http": 200,
+        "body": {
+          "project": "p",
+          "task": "TASK-001",
+          "file": "fixture.jsonl",
+          "line_count": 1,
+          "last_offset": 42,
+          "updated_at": 1788838520,
+          "truncated": false,
+          "limit": 200,
+          "generated_at": 1788838520.1499379,
+          "lines": [
+            {
+              "line_no": 1,
+              "ok": false,
+              "type": "raw",
+              "text": "fixture-private-code"
+            }
+          ]
+        }
+      }
+    },
+    "server_errors": [
+      "TypeError: 'int' object is not iterable",
+      "TypeError: ApiHandler._downlink_pickup() takes 1 positional argument but 2 were given",
+      "ValueError: invalid literal for int() with base 10: 'dl-000001'"
+    ],
+    "agent_event_lost_to_server_seq_collision": true,
+    "two_identical_new_session_lines_stored": 1
+  }
+}

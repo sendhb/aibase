@@ -51,6 +51,9 @@ NAME = "reviewer"  # 心跳/事件文件名：autoloop-reviewer.heartbeat / -eve
 DEFAULT_INTERVAL = 300
 DEFAULT_TIMEOUT = 1800
 DEFAULT_LLM = "pi"
+STALE_HOURS = 2.0  # in-review 滞留巡检阈值（与 `task stale` CLI 默认一致，宁早勿晚）
+STALE_EVERY_ROUNDS = 10  # 巡检频率：每 N 轮检测一次，首轮即扫（TASK-108 计划.3）
+_stale_rounds = 0  # 进程内轮次计数（run_once 递增；测试可直接重置）
 
 
 # ---------------- 参数解析 ----------------
@@ -95,7 +98,8 @@ def _task_cli(root, *args):
     try:
         proc = subprocess.run([sys.executable, script] + list(args),
                               cwd=root, capture_output=True, text=True,
-                              encoding="utf-8", errors="replace")
+                              encoding="utf-8", errors="replace",
+                              creationflags=llm.NO_WINDOW)  # TASK-084 弹窗抑制
     except FileNotFoundError:
         log("✗ 找不到 task CLI: %s" % script)
         return 127
@@ -155,7 +159,7 @@ def run_llm_reviewer(provider, prompt, *, log_dir, task, timeout=None,
 
 # ---------------- 选任务 ----------------
 
-def pick_in_review(tasks_dir, agent_id, log_fn=None):
+def pick_in_review(tasks_dir, agent_id, log_fn=None, log_dir=None, root=None):
     """选第一个 in-review 且 assignee ≠ 自己的任务（按任务编号升序），返回短 id；无则 None。
 
     与旧 Bash autoloop-reviewer pick_task 逐项一致：
@@ -163,6 +167,14 @@ def pick_in_review(tasks_dir, agent_id, log_fn=None):
       - assignee 非空且 == 自己 → 跳过（生成者 ≠ 审查者）
       - fast-path（risk/priority 非 P0/P1 且 reviewer 空/any/none）→ 防御性跳过
         （正常不会进入 in-review，coder 直接 done；TASK-047/048 分级治理）
+
+    TASK-108：fast-path 跳过不再静默——双流显式告警（log_dir 传入时；旧调用
+    保持安静，兼容测试）：
+      ① autoloop 事件流 outcome=skip_fastpath（监控端 aimonitor 可计数告警）；
+      ② task-events.jsonl 审计 outbox 新增事件类型 reviewer.fastpath_skip
+        （带 task id 与 reason）。
+    矛盾态只升级不处置：保持 continue，不自动改状态（治理决策留人，第 4 次
+    实录：aimonitor TASK-073 滞留 24h+，3900+ 轮静默跳过）。
     """
     for f in tasklib.task_files(tasks_dir):
         path = os.path.join(tasks_dir, f)
@@ -175,9 +187,20 @@ def pick_in_review(tasks_dir, agent_id, log_fn=None):
         if assignee and assignee == agent_id:
             continue  # 生成者 ≠ 审查者：跳过自己实现的任务
         if tasklib.is_fast_path(fm):
+            short = tasklib.short_id(tasklib.fm_get(fm, "name")) or \
+                tasklib.short_id(f[:-3]) or f[:-3]
+            if log_dir:
+                reason = ("in-review+fast-path 矛盾态：reviewer 循环会跳过"
+                          "（解堵：task start 打回或人工 done）")
+                events.emit_event(log_dir, NAME, short, "skip_fastpath",
+                                  reason=reason)
+                tasklib.append_event("reviewer.fastpath_skip", short, log_dir,
+                                     root=root, reason=reason)
             if log_fn:
-                log_fn("⏭ %s 是 fast-path（risk/priority 非 P0/P1 且未指定 reviewer），跳过审查"
-                       % f[:-3])
+                log_fn("⚠ %s 是 fast-path（risk/priority 非 P0/P1 且未指定 reviewer）"
+                       "却滞留 in-review，跳过审查（skip_fastpath / "
+                       "reviewer.fastpath_skip 事件已记；解堵：task start 打回或人工 done）"
+                       % short)
             continue
         return tasklib.short_id(tasklib.fm_get(fm, "name")) or \
             tasklib.short_id(f[:-3]) or f[:-3]
@@ -247,7 +270,25 @@ def run_once(root, opts, log_file, log_dir, task_cli_fn=None, llm_fn=None):
     tasks_dir = os.path.join(root, "runtime", "tasks")
     events.heartbeat(log_dir, NAME)  # 每轮开始写心跳（mtime 判活，红线不变）
 
-    task_id = pick_in_review(tasks_dir, opts.id, log_fn=lambda m: log(m, log_file))
+    # in-review 滞留巡检（TASK-108 计划.3：`task stale` 接入 autoloop 循环）：
+    # 每 STALE_EVERY_ROUNDS 轮机械执行同语义扫描（首轮即扫），逐滞留任务显式发
+    # stale_in_review 告警事件——不依赖人工记得跑 CLI（TASK-073 滞留 24h+ 的
+    # 第 4 次实录）。无滞留时零输出零噪音；巡检是旁路：只告警不改状态，事件
+    # 失败也不阻断（emit_event 内部降级）。
+    global _stale_rounds
+    _stale_rounds += 1
+    if _stale_rounds % STALE_EVERY_ROUNDS == 1:
+        for stale_name, age_h in tasklib.stale_in_review(tasks_dir, STALE_HOURS):
+            stale_id = tasklib.short_id(stale_name) or stale_name
+            reason = "in-review 滞留 %.1fh 超阈值 %gh（updated 日期粒度，宁早勿晚）" \
+                % (age_h, STALE_HOURS)
+            log("⚠ %s 滞留 in-review %.1f 小时（阈值 %g 小时），stale_in_review 事件已记"
+                % (stale_id, age_h, STALE_HOURS), log_file)
+            events.emit_event(log_dir, NAME, stale_id, "stale_in_review",
+                              reason=reason)
+
+    task_id = pick_in_review(tasks_dir, opts.id, log_fn=lambda m: log(m, log_file),
+                             log_dir=log_dir, root=root)
     if not task_id:
         log("无待审查任务，跳过本轮", log_file)
         events.emit_event(log_dir, NAME, "-", "no_task")

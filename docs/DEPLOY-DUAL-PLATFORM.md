@@ -399,7 +399,7 @@ schtasks /End /TN "AIOS Agent"
 > powershell -ExecutionPolicy Bypass -File <aibase>/kit/tools/telemetry/deploy-remote-project.ps1 `
 >   -KitDir "<aibase>/kit" -ProjectsJson "<aimonitor>/config/projects.json" `
 >   -AgentsJson "<aimonitor>/config/agents.json" `
->   -ServerUrl "http://<监控端>/api/ingest"      # 如 http://47.109.205.200:3113/api/ingest
+>   -ServerUrl "http://<监控端>/api/ingest"      # 如 http://localhost:3113/api/ingest
 > ```
 
 服务端验证（在监控端执行）：

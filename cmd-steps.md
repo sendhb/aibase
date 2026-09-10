@@ -42,16 +42,16 @@
 
 ## 四、注册监控（agent，Python3）
 
-> 位置：`kit/tools/agent/agent.py`（监控平台 agent 注册链路，TASK-042~044）。
-> 配置：`agent.json`（默认读当前目录；示例 `kit/tools/agent/agent.json.example`）。
+> 位置：`kit/tools/telemetry/agent.py`（监控平台 agent 注册链路，TASK-042~044）。
+> 配置：`agent.json`（默认读当前目录；示例 `kit/tools/telemetry/agent.json.example`）。
 
 | 命令 | 简介 |
 |------|------|
-| `python3 kit/tools/agent/agent.py --register [--config agent.json]` | 注册状态管理（构建申请 → 等待审批 → 已注册） |
-| `python3 kit/tools/agent/agent.py --register --status [--config agent.json]` | 查看当前注册状态 |
-| `python3 kit/tools/agent/agent.py --register --reset [--config agent.json]` | 重置注册状态（pending → unregistered） |
-| `python3 kit/tools/agent/agent.py [--config agent.json] [--once] [--interval N] [--quiet]` | 启动监控推送（默认常驻 30s 轮询；--once 单轮适合 cron/systemd） |
-| `python3 kit/tools/agent/agent.py --check-config [--config agent.json]` | 只校验配置（exit 0/1） |
+| `python3 kit/tools/telemetry/agent.py --register [--config agent.json]` | 注册状态管理（构建申请 → 等待审批 → 已注册） |
+| `python3 kit/tools/telemetry/agent.py --register --status [--config agent.json]` | 查看当前注册状态 |
+| `python3 kit/tools/telemetry/agent.py --register --reset [--config agent.json]` | 重置注册状态（pending → unregistered） |
+| `python3 kit/tools/telemetry/agent.py [--config agent.json] [--once] [--interval N] [--quiet]` | 启动监控推送（默认常驻 30s 轮询；--once 单轮适合 cron/systemd） |
+| `python3 kit/tools/telemetry/agent.py --check-config [--config agent.json]` | 只校验配置（exit 0/1） |
 
 ## 五、多项目自动调度（dispatcher，Python3）
 

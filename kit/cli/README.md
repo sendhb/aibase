@@ -43,6 +43,7 @@ python kit/cli/autoloop coder    --interval 300 --unattended --id coder-1
 python kit/cli/autoloop reviewer --interval 300 --unattended --id reviewer-1
 python kit/cli/autoloop status   --interval 300   # 单屏聚合：壳死活/LLM 子进程/in-progress/最近事件
 python kit/cli/autoloop ensure                    # 看门狗：幂等探活+拉起（供定时器高频调用）
+python kit/cli/autoloop watchdog                  # 本仓自看看门狗：常驻薄壳定时调 ensure（TASK-111）
 ```
 
 > **status（TASK-099）**：单屏回答三个问题 —— 循环壳死活（PID + heartbeat 年龄）、
@@ -78,6 +79,29 @@ python kit/cli/autoloop ensure                    # 看门狗：幂等探活+拉
   `--max-age S` 可覆盖；循环活性取 coder/reviewer 两心跳中最新者。
 - 返回码：0 = 健康或已拉起；1 = 拉起失败/参数非法（并发锁竞争拒启属预期：胜出
   实例已在跑，定时器可忽略）。
+
+**本仓自看看门狗（TASK-111）**：`autoloop watchdog` —— 每仓一个常驻薄壳，定时调
+`ensure` 探活拉起本仓，**不依赖系统定时器/计划任务**（容器、受限环境、多平台统一的
+最低公共分母）：
+
+```bash
+python kit/cli/autoloop watchdog                 # 常驻（每 120s 巡检；Ctrl-C 停止）
+python kit/cli/autoloop watchdog --interval 60   # 自定义间隔；--max-age S 透传 ensure
+python kit/cli/autoloop watchdog --once          # 单轮自检（不持锁）
+python kit/cli/autoloop stop                     # 同时停止 both + 看门狗
+```
+
+- **薄壳零判定**：生死判定 100% 复用 `ensure`（子进程调用，30s 超时——ensure 悬挂
+  只损失一轮）；本层只做调度/心跳/事件，判定逻辑出现第二份 = 未来事故。
+- **自描述存活**：`runtime/locks/autoloop-watchdog.{lock,pid}` +
+  `runtime/logs/autoloop-watchdog.heartbeat` + 每轮事件（ok/error）→ 事件流停滞
+  = 看门狗死亡，远端监控可见（aimonitor 现有事件链路免费接走）。
+- **每仓自看，零配置**：cwd 即项目根，无项目清单/注册表；与系统定时器**可并存**
+  （ensure 幂等 + both 锁防重，叠加无冲突）。
+- **残余风险（知情）**：无 OS 兜底——看门狗自身死亡或机器重启后需人工重启
+  （现有批量启动脚本每仓加一行 `autoloop watchdog` 即可；`@reboot` /
+  `Restart=always` 可选加固不强制）。每轮一行事件（默认 120s ≈ 720 行/天/仓）
+  是"死亡远端可见"的设计价格。
 
 **Windows（schtasks）**：每 2 分钟探活 + 开机自启：
 

@@ -16,6 +16,7 @@
 注入 seam；e2e 通过 AUTOLOOP_LIB_DIR（stub 核心）+ AIOS_PROJECT_ROOT（临时根）隔离。
 """
 import contextlib
+import datetime
 import io
 import json
 import os
@@ -39,6 +40,7 @@ import autoloop_launcher as L  # noqa: E402
 import autoloop_reviewer as R  # noqa: E402
 import events  # noqa: E402
 import llm  # noqa: E402
+import tasklib  # noqa: E402
 
 PY = sys.executable
 LAUNCHER = os.path.join(_REPO, "kit", "cli", "autoloop")
@@ -50,7 +52,8 @@ with open(os.path.join(os.getcwd(), "stub_calls.txt"), "a", encoding="utf-8") as
 
 
 def _write_task(tasks_dir, name, status="open", risk="P2", priority="P2",
-                reviewer="any", approval="none", rework="0", assignee="any"):
+                reviewer="any", approval="none", rework="0", assignee="any",
+                updated=None):
     os.makedirs(tasks_dir, exist_ok=True)
     path = os.path.join(tasks_dir, name + ".md")
     with open(path, "w", encoding="utf-8") as f:
@@ -58,8 +61,9 @@ def _write_task(tasks_dir, name, status="open", risk="P2", priority="P2",
             "---\nname: %s\ndescription: t\nmetadata:\n  type: task\n"
             "  status: %s\n  priority: %s\n  risk: %s\n  approval-ref: %s\n"
             "  assignee: %s\n  reviewer: %s\n  rework-count: %s\n"
-            "  depends-on: []\n---\n\n- [x] ok\n" % (
-                name, status, priority, risk, approval, assignee, reviewer, rework))
+            "  depends-on: []\n%s---\n\n- [x] ok\n" % (
+                name, status, priority, risk, approval, assignee, reviewer, rework,
+                ("  updated: %s\n" % updated) if updated else ""))
     return path
 
 
@@ -76,7 +80,7 @@ class _RootCase(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._cleanup_tmp)
+        self.addCleanup(self.tmp.cleanup)
         self.root = self.tmp.name
         with open(os.path.join(self.root, "aios.config.yaml"), "w") as f:
             f.write("commands: {}\n")
@@ -84,19 +88,6 @@ class _RootCase(unittest.TestCase):
         self.logs = os.path.join(self.root, "runtime", "logs")
         os.makedirs(self.tasks)
         os.makedirs(self.logs)
-
-    def _cleanup_tmp(self):
-        """容错清理（Windows）：E2E 分离子进程可能仍短暂持有 log 句柄，
-        立即 rmtree 会 WinError 32（TASK-107 实测）。短暂等待重试一次，
-        仍失败则放行（OS 临时目录终会回收；断言已在 cleanup 前完成）。"""
-        try:
-            self.tmp.cleanup()
-        except OSError:
-            time.sleep(0.3)
-            try:
-                self.tmp.cleanup()
-            except OSError:
-                pass
 
 
 class CoderArgsTests(unittest.TestCase):
@@ -248,6 +239,94 @@ class ReviewerTests(_RootCase):
         _write_task(self.tasks, "TASK-901-fastish", status="in-review",
                     risk="P2", reviewer="any")
         self.assertEqual(R.pick_in_review(self.tasks, "reviewer-y"), None)
+
+    def test_pick_emits_skip_fastpath_event(self):
+        # TASK-108 验收：fast-path 跳过不再静默——autoloop-reviewer-events.jsonl
+        # 新增含该 task id 的告警事件 + 审计流新增 reviewer.fastpath_skip（带 reason）
+        _write_task(self.tasks, "TASK-905-stuck", status="in-review",
+                    risk="P2", reviewer="any")
+        self.assertEqual(
+            R.pick_in_review(self.tasks, "reviewer-y", log_dir=self.logs), None)
+        outcomes = _outcomes(self.logs, "reviewer")
+        self.assertEqual(outcomes, ["skip_fastpath"])
+        with open(events.events_path(self.logs, "reviewer"), encoding="utf-8") as f:
+            rec = json.loads(f.readline())
+        self.assertEqual(rec["task"], "TASK-905")  # 短 id
+        self.assertIn("fast-path", rec["reason"])
+        # 审计 outbox：新增事件类型 reviewer.fastpath_skip，带 task id 与 reason
+        with open(tasklib.events_path(self.logs), encoding="utf-8") as f:
+            audit = [json.loads(l) for l in f if l.strip()]
+        skip = [e for e in audit if e["ev"] == "reviewer.fastpath_skip"]
+        self.assertEqual(len(skip), 1)
+        self.assertEqual((skip[0]["task"], bool(skip[0]["reason"])),
+                         ("TASK-905", True))
+        self.assertEqual(tasklib.validate_events(self.logs), (0, 1))
+
+    def test_run_once_emits_stale_in_review(self):
+        # TASK-108 验收：构造 in-review 超阈值任务（updated 3 天前 ≈ --hours 0
+        # 等价注入）→ 循环日志含 stale 告警 + 事件；滞留 fast-path 仍不触发 LLM
+        old = (datetime.date.today() - datetime.timedelta(days=3)).isoformat()
+        _write_task(self.tasks, "TASK-906-limbo", status="in-review",
+                    risk="P2", reviewer="any", updated=old)
+        R._stale_rounds = 0  # 首轮即扫
+        llm_calls = []
+        log_path = os.path.join(self.logs, "reviewer-stale-hit.log")
+        rc = R.run_once(self.root, R.parse_args(["--once", "--id", "reviewer-y"]),
+                        log_path, self.logs, task_cli_fn=lambda root, *a: 0,
+                        llm_fn=lambda *a, **k: llm_calls.append(a) or 0)
+        self.assertEqual((rc, llm_calls), (0, []))
+        self.assertEqual(_outcomes(self.logs, "reviewer"),
+                         ["stale_in_review", "skip_fastpath", "no_task"])
+        with open(log_path, encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("⚠ TASK-906 滞留 in-review", text)  # 日志含 stale 告警
+        self.assertIn("⚠ TASK-906 是 fast-path", text)    # 日志含 fast-path 告警
+
+    def test_stale_scan_every_n_rounds(self):
+        # 计划.3：每 STALE_EVERY_ROUNDS 轮巡检一次（首轮即扫）；skip_fastpath
+        # 逐轮告警不受 N 门控，stale 事件只在扫描轮出现
+        old = (datetime.date.today() - datetime.timedelta(days=3)).isoformat()
+        _write_task(self.tasks, "TASK-908-gate", status="in-review",
+                    risk="P2", reviewer="someone", assignee="agent-x",
+                    updated=old)
+        R._stale_rounds = 0
+        run = lambda: R.run_once(self.root,
+                                 R.parse_args(["--once", "--id", "reviewer-y"]),
+                                 None, self.logs, task_cli_fn=lambda root, *a: 0,
+                                 llm_fn=lambda *a, **k: 0)
+        run()  # 第 1 轮：扫描
+        self.assertEqual(_outcomes(self.logs, "reviewer"), ["stale_in_review"])
+        run()  # 第 2 轮：非扫描轮 → 无 stale 事件
+        self.assertEqual(_outcomes(self.logs, "reviewer"), ["stale_in_review"])
+
+    def test_run_once_zero_noise_when_no_stale(self):
+        # TASK-108 验收：无滞留任务时一轮循环日志无 stale/skip 输出（零噪音）
+        _write_task(self.tasks, "TASK-909-fresh", status="in-review",
+                    risk="P2", reviewer="someone", assignee="agent-x")
+        R._stale_rounds = 0
+        log_path = os.path.join(self.logs, "reviewer-zero-noise.log")
+        R.run_once(self.root, R.parse_args(["--once", "--id", "reviewer-y"]),
+                   log_path, self.logs, task_cli_fn=lambda root, *a: 0,
+                   llm_fn=lambda *a, **k: 0)
+        with open(log_path, encoding="utf-8") as f:
+            text = f.read()
+        self.assertNotIn("stale", text)
+        self.assertNotIn("skip_fastpath", text)
+        self.assertEqual(_outcomes(self.logs, "reviewer"), [])
+
+    def test_run_once_stale_non_fastpath_still_picked(self):
+        # 滞留巡检是旁路：非 fast-path 滞留任务仍照常被选中审查
+        old = (datetime.date.today() - datetime.timedelta(days=3)).isoformat()
+        _write_task(self.tasks, "TASK-907-old", status="in-review",
+                    risk="P2", reviewer="someone", assignee="agent-x",
+                    updated=old)
+        R._stale_rounds = 0
+        llm_calls = []
+        R.run_once(self.root, R.parse_args(["--once", "--id", "reviewer-y"]),
+                   None, self.logs, task_cli_fn=lambda root, *a: 0,
+                   llm_fn=lambda *a, **k: llm_calls.append(a) or 0)
+        self.assertEqual(len(llm_calls), 1)
+        self.assertEqual(_outcomes(self.logs, "reviewer"), ["stale_in_review"])
 
     def test_pick_none_when_empty(self):
         self.assertEqual(R.pick_in_review(self.tasks, "reviewer-y"), None)
@@ -508,6 +587,113 @@ class EnsureUnitTests(_RootCase):
         self.assertEqual(L.cmd_ensure(self.root, p), 1)
 
 
+class WatchdogUnitTests(_RootCase):
+    """watchdog 薄壳单测（TASK-111）：调度/心跳/事件，判定零复制。"""
+
+    def test_watchdog_interval_priority(self):
+        p = L.parse_args(["watchdog", "--interval", "60"])
+        self.assertEqual(L.watchdog_interval(p), 60)
+        with mock.patch.dict(os.environ, {"AUTOLOOP_WATCHDOG_INTERVAL": "7"}):
+            self.assertEqual(L.watchdog_interval(L.parse_args(["watchdog"])), 7)
+        with mock.patch.dict(os.environ, {"AUTOLOOP_WATCHDOG_INTERVAL": "x"}):
+            self.assertEqual(L.watchdog_interval(L.parse_args(["watchdog"])), 120)
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(L.watchdog_interval(L.parse_args(["watchdog"])), 120)
+
+    def test_run_ensure_invokes_launcher_ensure(self):
+        seen = {}
+
+        def fake_run(argv, **kw):
+            seen["argv"] = argv
+            seen["kw"] = kw
+            return subprocess.CompletedProcess(argv, 0, stdout="ok\n", stderr="")
+
+        with mock.patch.object(L.subprocess, "run", fake_run):
+            ok, detail = L.run_ensure(self.root, max_age=60)
+        self.assertTrue(ok)
+        self.assertEqual(seen["argv"][:3],
+                         [sys.executable, L.LAUNCHER_SCRIPT, "ensure"])
+        self.assertEqual(seen["argv"][-2:], ["--max-age", "60"])
+        self.assertEqual(seen["kw"]["cwd"], self.root)
+        self.assertLessEqual(seen["kw"]["timeout"], L.ENSURE_TIMEOUT)
+        self.assertIn("rc=0", detail)
+
+    def test_run_ensure_timeout_tolerated(self):
+        def _boom(*a, **kw):
+            raise subprocess.TimeoutExpired(cmd="ensure", timeout=L.ENSURE_TIMEOUT)
+
+        with mock.patch.object(L.subprocess, "run", _boom):
+            ok, detail = L.run_ensure(self.root)
+        self.assertFalse(ok)
+        self.assertIn("超时", detail)
+
+    def test_run_ensure_oserror_tolerated(self):
+        def _boom(*a, **kw):
+            raise OSError("no such script")
+
+        with mock.patch.object(L.subprocess, "run", _boom):
+            ok, detail = L.run_ensure(self.root)
+        self.assertFalse(ok)
+        self.assertIn("启动失败", detail)
+
+    def test_watchdog_once_ok_writes_hb_and_event(self):
+        p = L.parse_args(["watchdog", "--once"])
+        with mock.patch.object(L, "run_ensure",
+                               lambda *a, **k: (True, "rc=0 健康")):
+            self.assertEqual(L.cmd_watchdog(self.root, p), 0)
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.logs, "autoloop-watchdog.heartbeat")))
+        path = os.path.join(self.logs, "autoloop-watchdog-events.jsonl")
+        with open(path, encoding="utf-8") as f:
+            recs = [json.loads(l) for l in f if l.strip()]
+        self.assertEqual(len(recs), 1)
+        self.assertEqual((recs[0]["task"], recs[0]["outcome"]), ("-", "ok"))
+        self.assertIn("rc=0", recs[0]["reason"])
+
+    def test_watchdog_once_error_rc1(self):
+        p = L.parse_args(["watchdog", "--once"])
+        with mock.patch.object(L, "run_ensure",
+                               lambda *a, **k: (False, "rc=1 拉起失败")):
+            self.assertEqual(L.cmd_watchdog(self.root, p), 1)
+        self.assertEqual(_outcomes(self.logs, "watchdog"), ["error"])
+
+    def test_watchdog_single_instance_rejected(self):
+        lock_dir = os.path.join(self.root, "runtime", "locks")
+        os.makedirs(lock_dir, exist_ok=True)
+        wd_lock = os.path.join(lock_dir, L.WATCHDOG_LOCK)
+        fd = L.lock._open_lock(wd_lock)
+        self.assertTrue(L.lock._acquire(fd))
+        try:
+            self.assertEqual(L.cmd_watchdog(self.root, L.parse_args(["watchdog"])), 1)
+            self.assertFalse(os.path.isfile(os.path.join(lock_dir, L.WATCHDOG_PID)),
+                             "拒启时不应写 PID 文件")
+        finally:
+            L.lock._release(fd)
+            os.close(fd)
+
+    def test_stop_kills_watchdog(self):
+        lock_dir = os.path.join(self.root, "runtime", "locks")
+        os.makedirs(lock_dir, exist_ok=True)
+        fake = subprocess.Popen([PY, "-c", "import time; time.sleep(30)"])
+        pidfile = os.path.join(lock_dir, L.WATCHDOG_PID)
+        with open(pidfile, "w", encoding="ascii") as f:
+            f.write(str(fake.pid))
+        with contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(L.cmd_stop(self.root), 0)
+        self.assertFalse(os.path.isfile(pidfile))
+        fake.wait(timeout=10)
+        self.assertLess(fake.returncode, 0)
+
+    def test_status_shows_watchdog_lines(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            L.cmd_status(self.root, L.parse_args(["status"]))
+        out = buf.getvalue()
+        self.assertIn("看门狗: 已停止", out)
+        self.assertIn("watchdog", out)
+
+
 class LauncherE2ETests(_RootCase):
     """子进程 e2e：stub 角色核心 + 临时项目根，绝不触碰真实任务/真实 LLM。"""
 
@@ -670,6 +856,80 @@ class LauncherE2ETests(_RootCase):
                         fake.wait(timeout=5)
                     except Exception:  # noqa: BLE001 — 已被 restart 击杀则忽略
                         pass
+
+    def test_watchdog_once_e2e(self):
+        """验收：--once 单轮真实链路（ensure 子进程→拉起 stub both）+ 心跳/事件落盘。"""
+        try:
+            proc = self._run("watchdog", "--once")
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            hb = os.path.join(self.logs, "autoloop-watchdog.heartbeat")
+            ev = os.path.join(self.logs, "autoloop-watchdog-events.jsonl")
+            self.assertTrue(os.path.isfile(hb), "巡检应写看门狗心跳")
+            self.assertTrue(os.path.isfile(ev), "巡检应写看门狗事件")
+            self.assertEqual(_outcomes(self.logs, "watchdog"), ["ok"])
+        finally:
+            with contextlib.redirect_stderr(io.StringIO()):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    L.cmd_stop(self.root)  # 兑底清理 ensure 拉起的 both
+
+    def test_watchdog_resident_lifecycle(self):
+        """验收：常驻看门狗→心跳/事件→ensure 拉起 both→stop 停止且 PID 清理（TASK-111）。"""
+        proc = subprocess.Popen(
+            [PY, LAUNCHER, "watchdog", "--interval", "1"],
+            cwd=self.root, env=self.env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace")
+        wd_pidfile = os.path.join(self.root, "runtime", "locks", L.WATCHDOG_PID)
+        hb = os.path.join(self.logs, "autoloop-watchdog.heartbeat")
+        ev = os.path.join(self.logs, "autoloop-watchdog-events.jsonl")
+        both_pidfile = os.path.join(self.root, "runtime", "locks", L.BOTH_PID)
+        try:
+            self.assertTrue(self._wait_for(lambda: os.path.isfile(wd_pidfile), 15),
+                            "看门狗启动后应出现 PID 文件")
+            self.assertTrue(self._wait_for(
+                lambda: os.path.isfile(hb) and os.path.isfile(ev), 15),
+                "巡检应写心跳与事件（ensure 子进程被真实调用）")
+            self.assertTrue(self._wait_for(
+                lambda: os.path.isfile(both_pidfile), 30),
+                "看门狗应经 ensure 拉起 both 壳（判定链路真实走通）")
+            stop = self._run("stop")
+            self.assertEqual(stop.returncode, 0, stop.stderr)
+
+            # settle 收敛验收：stop 后容忍残余 fork 竞态（ensure 被杀前已 fork、
+            # both 子进程延迟写 PID）——PID 复现则再 stop（≤3 次），连续 3 拍全净
+            # （间隔 0.5s）才算收编完成；最终未收敛时附诊断信息。
+            def _clear():
+                return (not os.path.isfile(wd_pidfile)
+                        and not os.path.isfile(both_pidfile))
+
+            settled, stops, streak = False, 1, 0
+            deadline = time.time() + 45
+            while time.time() < deadline:
+                if _clear():
+                    streak += 1
+                    if streak >= 3:
+                        settled = True
+                        break
+                else:
+                    streak = 0
+                    if stops < 3:
+                        self._run("stop")  # 复活实例 → 再收
+                        stops += 1
+                time.sleep(0.5)
+            self.assertTrue(
+                settled,
+                "stop 后 45s 未收敛（stop×%d）；wd_pid=%s both_pid=%s；看门狗输出尾: %r"
+                % (stops, os.path.isfile(wd_pidfile), os.path.isfile(both_pidfile),
+                   (proc.stdout.read() or "")[-200:] if proc.stdout else None))
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            with contextlib.redirect_stderr(io.StringIO()):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    L.cmd_stop(self.root)  # 兑底清理，避免残留常驻进程
 
 
 if __name__ == "__main__":

@@ -184,9 +184,13 @@ def report_result(server_url, token, command_id, report,
     """POST /api/downlink/commands/{id}/result（契约 §四）。
 
     已终态（409）→ 幂等忽略，返回 "already-terminal"；成功返回 server 响应 dict。
+    body 按契约 §四 schema 携带 command_id（与 URL 路径同值；server 以路径为准，
+    字段仅供回报自描述/审计）。
     """
     url = derive_downlink_base_url(server_url) + DOWNLINK_RESULT_PATH.format(command_id=command_id)
-    body = json.dumps(report, ensure_ascii=False).encode("utf-8")
+    payload = dict(report)
+    payload["command_id"] = command_id
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(url, data=body, method="POST")
     req.add_header("Authorization", "Bearer " + token)
     req.add_header("Content-Type", "application/json")

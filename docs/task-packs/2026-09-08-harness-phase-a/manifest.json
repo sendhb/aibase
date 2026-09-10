@@ -1,0 +1,210 @@
+{
+  "schema_version": 1,
+  "package_id": "aios-harness-phase-a-2026-09-08",
+  "status": "planned",
+  "baseline": {
+    "aios": "1adfb26",
+    "aimonitor": "b93d5b2"
+  },
+  "runtime_imported": false,
+  "entrypoint": "README.md",
+  "execution_protocol": "EXECUTION.md",
+  "contracts": "CONTRACTS.md",
+  "role_independence": "ROLE-INDEPENDENCE.md",
+  "acceptance": "ACCEPTANCE.md",
+  "tasks": [
+    {
+      "id": "A01",
+      "file": "tasks/A01-isolated-test-foundation.md",
+      "status": "planned",
+      "repository": "双仓库",
+      "depends_on": [],
+      "findings": [
+        "F14"
+      ],
+      "review": "常规独立复审"
+    },
+    {
+      "id": "A02",
+      "file": "tasks/A02-downlink-http-repair.md",
+      "status": "planned",
+      "repository": "AIMonitor 为主",
+      "depends_on": [
+        "A01"
+      ],
+      "findings": [
+        "F02"
+      ],
+      "review": "架构复审：HTTP / schema / 旧数据"
+    },
+    {
+      "id": "A03",
+      "file": "tasks/A03-explicit-task-dispatch.md",
+      "status": "planned",
+      "repository": "双仓库",
+      "depends_on": [
+        "A02"
+      ],
+      "findings": [
+        "F06",
+        "F12"
+      ],
+      "review": "架构复审：双端命令兼容"
+    },
+    {
+      "id": "A04",
+      "file": "tasks/A04-task-eligibility.md",
+      "status": "planned",
+      "repository": "aibase",
+      "depends_on": [
+        "A03"
+      ],
+      "findings": [
+        "F06",
+        "F08"
+      ],
+      "review": "架构复审：人工入口与自动领取边界"
+    },
+    {
+      "id": "A05",
+      "file": "tasks/A05-verification-attempt-state.md",
+      "status": "planned",
+      "repository": "aibase",
+      "depends_on": [
+        "A04"
+      ],
+      "findings": [
+        "F01"
+      ],
+      "review": "架构复审：失败、崩溃与历史兼容"
+    },
+    {
+      "id": "A06",
+      "file": "tasks/A06-artifact-bound-verification.md",
+      "status": "planned",
+      "repository": "aibase",
+      "depends_on": [
+        "A05"
+      ],
+      "findings": [
+        "F01",
+        "F08"
+      ],
+      "review": "必须架构复审：输入范围与失效策略"
+    },
+    {
+      "id": "A07",
+      "file": "tasks/A07-complete-task-snapshots.md",
+      "status": "planned",
+      "repository": "双仓库",
+      "depends_on": [
+        "A02",
+        "A04"
+      ],
+      "findings": [
+        "F03"
+      ],
+      "review": "必须架构复审：容量、兼容与未知状态"
+    },
+    {
+      "id": "A08",
+      "file": "tasks/A08-event-sequence-namespaces.md",
+      "status": "planned",
+      "repository": "AIMonitor 为主",
+      "depends_on": [
+        "A02",
+        "A07"
+      ],
+      "findings": [
+        "F04"
+      ],
+      "review": "架构复审：存储迁移与 cursor"
+    },
+    {
+      "id": "A09",
+      "file": "tasks/A09-read-access-control.md",
+      "status": "planned",
+      "repository": "双仓库",
+      "depends_on": [
+        "A07",
+        "A08"
+      ],
+      "findings": [
+        "F09"
+      ],
+      "review": "必须安全/架构复审"
+    },
+    {
+      "id": "A10",
+      "file": "tasks/A10-fatal-error-classification.md",
+      "status": "planned",
+      "repository": "aibase",
+      "depends_on": [
+        "A03"
+      ],
+      "findings": [
+        "F11"
+      ],
+      "review": "常规复审，provider 格式依据需核查"
+    },
+    {
+      "id": "A11",
+      "file": "tasks/A11-unbounded-task-ids.md",
+      "status": "planned",
+      "repository": "双仓库（各自 ID 消费点）",
+      "depends_on": [
+        "A04"
+      ],
+      "findings": [
+        "F16"
+      ],
+      "review": "常规独立复审"
+    },
+    {
+      "id": "A12",
+      "file": "tasks/A12-ci-and-gate-repair.md",
+      "status": "planned",
+      "repository": "双仓库",
+      "depends_on": [
+        "A01",
+        "A02",
+        "A03",
+        "A04",
+        "A05",
+        "A06",
+        "A07",
+        "A08",
+        "A09",
+        "A10",
+        "A11"
+      ],
+      "findings": [
+        "F14"
+      ],
+      "review": "架构复审：发布门禁与供应链输入"
+    },
+    {
+      "id": "A13",
+      "file": "tasks/A13-independent-phase-acceptance.md",
+      "status": "planned",
+      "repository": "双仓库",
+      "depends_on": [
+        "A12"
+      ],
+      "findings": [
+        "F01",
+        "F02",
+        "F03",
+        "F04",
+        "F06",
+        "F08",
+        "F09",
+        "F11",
+        "F14",
+        "F16"
+      ],
+      "review": "最终独立验收；不要由前面实现者自签"
+    }
+  ],
+  "note": "Planning manifest only; does not authorize automatic execution or certify implementation."
+}
